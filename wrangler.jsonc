@@ -1,0 +1,41 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gdrive-s3",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-05",
+  "kv_namespaces": [
+    {
+      "binding": "AUTH_KV",
+      "id": "REPLACE_WITH_AUTH_KV_ID"
+    },
+    {
+      "binding": "FOLDER_CACHE",
+      "id": "REPLACE_WITH_FOLDER_CACHE_ID"
+    }
+  ],
+  "vars": {
+    "REGION": "us-east-1",
+    "ALLOWED_BUCKETS": "my-bucket",
+    "PUBLIC_READ_BUCKETS": ""
+  }
+  // "r2_buckets": [
+  //   {
+  //     "binding": "MY_BUCKET",
+  //     "bucket_name": "my-bucket"
+  //   }
+  // ],
+  // "d1_databases": [
+  //   {
+  //     "binding": "MY_DB",
+  //     "database_name": "my-database",
+  //     "database_id": ""
+  //   }
+  // ],
+  // "ai": {
+  //   "binding": "AI"
+  // },
+  // "observability": {
+  //   "enabled": true,
+  //   "head_sampling_rate": 1
+  // }
+}
