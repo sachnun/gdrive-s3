@@ -2,9 +2,9 @@
   "name": "gdrive-s3",
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy --minify",
-    "cf-typegen": "wrangler types --env-interface CloudflareBindings",
+    "dev": "npx wrangler dev",
+    "deploy": "npx wrangler deploy --minify",
+    "cf-typegen": "npx wrangler types --env-interface CloudflareBindings",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
@@ -18,7 +18,6 @@
     "@types/node": "^26.1.2",
     "aws4fetch": "^1.0.0",
     "typescript": "^5.0.0",
-    "vitest": "^3.0.0",
-    "wrangler": "^4.110.0"
+    "vitest": "^3.0.0"
   }
 }
