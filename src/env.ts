@@ -8,6 +8,13 @@ export interface Env {
   GOOGLE_CLIENT_ID: string
   GOOGLE_CLIENT_SECRET: string
   GOOGLE_REFRESH_TOKEN: string
+  /**
+   * Optional: service accounts replacing GOOGLE_REFRESH_TOKEN auth. Raw
+   * concatenated service-account JSON blobs (rclone service_account_file
+   * format) or a JSON array. May also be stored in AUTH_KV under the key
+   * "service_accounts" (KV values hold up to 25 MB, secrets only 5 KB).
+   */
+  GOOGLE_SERVICE_ACCOUNTS?: string
   /** Comma-separated list of bucket names allowed on this worker. */
   ALLOWED_BUCKETS: string
   /** Optional: comma-separated buckets whose GET/HEAD skip signature verification. */

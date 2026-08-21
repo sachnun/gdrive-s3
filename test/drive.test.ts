@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { DRIVE_API, driveFetch, getAccessToken } from '../src/drive/auth'
+import { DRIVE_API, driveFetch, getAccessToken, parseServiceAccounts } from '../src/drive/auth'
 import { FOLDER_MIME, findFolder, getOrCreateFolder, resolveExistingPath, resolvePathCreate } from '../src/drive/folder'
 import { downloadFile, findFilesInFolder, trashFile, uploadFile } from '../src/drive/files'
 import { FakeDrive, makeEnv, makeFetchStub } from './harness'
@@ -46,6 +46,108 @@ describe('drive auth (KV-backed token)', () => {
     const res = await driveFetch(env, `${DRIVE_API}/drive/v3/files?q=trashed=false&fields=files(id)`)
     expect(res.status).toBe(200)
     expect(await env.AUTH_KV.get('access_token')).toBe('fake-token')
+  })
+})
+
+describe('drive auth with service accounts (JWT bearer)', () => {
+  let drive: FakeDrive
+  let stub: ReturnType<typeof makeFetchStub>
+  let restore: () => void
+
+  beforeEach(() => {
+    drive = new FakeDrive()
+    stub = makeFetchStub(drive)
+    restore = globalThis.fetch as unknown as () => void
+    globalThis.fetch = stub as unknown as typeof fetch
+  })
+  afterEach(() => {
+    globalThis.fetch = restore as unknown as typeof fetch
+  })
+
+  async function makeSaPem(): Promise<string> {
+    const pair = (await crypto.subtle.generateKey(
+      { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
+      true,
+      ['sign', 'verify'],
+    )) as CryptoKeyPair
+    const der = new Uint8Array((await crypto.subtle.exportKey('pkcs8', pair.privateKey)) as ArrayBuffer)
+    const b64 = btoa(String.fromCharCode(...der))
+    return `-----BEGIN PRIVATE KEY-----\n${b64.match(/.{1,64}/g)!.join('\n')}\n-----END PRIVATE KEY-----\n`
+  }
+
+  function saBlob(email: string, pem: string): string {
+    return JSON.stringify(
+      {
+        type: 'service_account',
+        project_id: 'p',
+        private_key_id: 'k',
+        private_key: pem,
+        client_email: email,
+        client_id: '1',
+        token_uri: 'https://oauth2.googleapis.com/token',
+        universe_domain: 'googleapis.com',
+      },
+      null,
+      2,
+    )
+  }
+
+  it('parses concatenated service-account JSON blobs and JSON arrays', async () => {
+    const pem = await makeSaPem()
+    const a = saBlob('sa-001@proj.iam.gserviceaccount.com', pem)
+    const b = saBlob('sa-002@proj.iam.gserviceaccount.com', pem)
+    expect(parseServiceAccounts(`${a}\n${b}`).map((s) => s.clientEmail)).toEqual([
+      'sa-001@proj.iam.gserviceaccount.com',
+      'sa-002@proj.iam.gserviceaccount.com',
+    ])
+    expect(parseServiceAccounts(`[${a},${b}]`).length).toBe(2)
+    expect(parseServiceAccounts('').length).toBe(0)
+    expect(parseServiceAccounts('garbage').length).toBe(0)
+  })
+
+  it('round-robins service accounts and caches per-SA tokens', async () => {
+    const pem = await makeSaPem()
+    const raw =
+      saBlob('sa-001@proj.iam.gserviceaccount.com', pem) +
+      '\n' +
+      saBlob('sa-002@proj.iam.gserviceaccount.com', pem)
+    const env = makeEnv({ GOOGLE_REFRESH_TOKEN: '', GOOGLE_SERVICE_ACCOUNTS: raw })
+
+    const tokens: string[] = []
+    for (let i = 0; i < 4; i++) tokens.push(await getAccessToken(env))
+
+    // alternates between the two SAs; calls 3-4 are cache hits
+    expect(tokens[0]).not.toBe(tokens[1])
+    expect(tokens[2]).toBe(tokens[0])
+    expect(tokens[3]).toBe(tokens[1])
+    expect(new Set(tokens).size).toBe(2)
+    // only two oauth exchanges total (one per SA), the rest served from KV
+    expect(stub.oauthLog.length).toBe(2)
+    expect(decodeURIComponent(stub.oauthLog[0])).toContain('grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer')
+  })
+
+  it('loads service accounts from AUTH_KV when the env var is absent', async () => {
+    const pem = await makeSaPem()
+    const env = makeEnv({ GOOGLE_REFRESH_TOKEN: '', GOOGLE_SERVICE_ACCOUNTS: '' })
+    await env.AUTH_KV.put('service_accounts', saBlob('sa-kv@proj.iam.gserviceaccount.com', pem))
+    expect(await getAccessToken(env)).toBe('sa-token-sa-kv')
+  })
+
+  it('invalidates cached SA tokens and retries once on 401', async () => {
+    const pem = await makeSaPem()
+    const email = 'sa-001@proj.iam.gserviceaccount.com'
+    const env = makeEnv({ GOOGLE_REFRESH_TOKEN: '', GOOGLE_SERVICE_ACCOUNTS: saBlob(email, pem) })
+    await env.AUTH_KV.put(`sa_token:${email}`, 'stale')
+    stub.setValidTokens(['sa-token-sa-001'])
+
+    const res = await driveFetch(env, `${DRIVE_API}/drive/v3/files?q=trashed=false&fields=files(id)`)
+    expect(res.status).toBe(200)
+    expect(await env.AUTH_KV.get(`sa_token:${email}`)).toBe('sa-token-sa-001')
+  })
+
+  it('errors clearly when no credentials are configured', async () => {
+    const env = makeEnv({ GOOGLE_REFRESH_TOKEN: '', GOOGLE_SERVICE_ACCOUNTS: '' })
+    await expect(getAccessToken(env)).rejects.toThrow(/No Google credentials configured/)
   })
 })
 

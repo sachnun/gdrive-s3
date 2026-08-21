@@ -100,7 +100,7 @@ export async function downloadFile(env: Env, id: string, range?: string | null):
  */
 export async function findFilesInFolder(env: Env, name: string, parentId: string): Promise<FileMeta[]> {
   const q = `name='${escQuery(name)}' and '${parentId}' in parents and trashed=false and mimeType!='${FOLDER_MIME}'`
-  const url = `${DRIVE_API}/drive/v3/files?q=${encodeURIComponent(q)}&pageSize=1000&fields=${FILE_FIELDS}&orderBy=createdTime desc&spaces=drive`
+  const url = `${DRIVE_API}/drive/v3/files?q=${encodeURIComponent(q)}&pageSize=1000&fields=files(${FILE_FIELDS})&orderBy=createdTime desc&spaces=drive`
   const res = await driveFetch(env, url)
   if (!res.ok) throw new DriveError(500, 'InternalError', `file search failed (HTTP ${res.status})`)
   const data = (await res.json()) as { files: FileMeta[] }

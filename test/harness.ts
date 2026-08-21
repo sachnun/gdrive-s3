@@ -146,12 +146,15 @@ export interface StubOptions {
 export interface FetchStub {
   (input: RequestInfo | URL, init?: RequestInit): Promise<Response>
   setValidTokens: (tokens: string[]) => void
+  /** Raw bodies of every POST sent to the oauth token endpoint. */
+  oauthLog: string[]
 }
 
 export function makeFetchStub(drive: FakeDrive, opts: StubOptions = {}): FetchStub {
   const state = {
     validTokens: opts.validTokens ?? ['fake-token'],
     refreshToken: opts.refreshToken ?? 'fake-token',
+    oauthLog: [] as string[],
   }
   const stub = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = new URL(String(input))
@@ -160,7 +163,20 @@ export function makeFetchStub(drive: FakeDrive, opts: StubOptions = {}): FetchSt
     const body = init?.body ?? null
 
     if (url.hostname === 'oauth2.googleapis.com') {
-      return new Response(JSON.stringify({ access_token: state.refreshToken, expires_in: 3600 }), {
+      const bodyText =
+        body instanceof URLSearchParams ? body.toString() : typeof body === 'string' ? body : ''
+      state.oauthLog.push(bodyText)
+      const grant = new URLSearchParams(bodyText).get('grant_type')
+      const assertion = new URLSearchParams(bodyText).get('assertion')
+      let token = state.refreshToken
+      if (grant === 'urn:ietf:params:oauth:grant-type:jwt-bearer' && assertion) {
+        // Derive the token from the JWT issuer so tests can tell SAs apart.
+        const payload = assertion.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')
+        const padded = payload + '='.repeat((4 - (payload.length % 4)) % 4)
+        const claims = JSON.parse(atob(padded)) as { iss?: string }
+        token = `sa-token-${(claims.iss ?? 'unknown').split('@')[0]}`
+      }
+      return new Response(JSON.stringify({ access_token: token, expires_in: 3600 }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       })
@@ -298,6 +314,7 @@ export function makeFetchStub(drive: FakeDrive, opts: StubOptions = {}): FetchSt
   stub.setValidTokens = (tokens: string[]) => {
     state.validTokens = tokens
   }
+  stub.oauthLog = state.oauthLog
   return stub
 }
 
