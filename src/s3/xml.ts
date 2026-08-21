@@ -61,7 +61,9 @@ export function initiateMultipartXml(bucket: string, key: string, uploadId: stri
 
 export function uploadPartXml(etag: string): Response {
   const xml = `<?xml version="1.0" encoding="UTF-8"?><UploadPartResult xmlns="${XMLNS}"><ETag>&quot;${xmlEscape(etag)}&quot;</ETag></UploadPartResult>`
-  return new Response(xml, { status: 200, headers: XML_HEADERS })
+  // The AWS SDKs read UploadPartOutput.ETag from the ETag response header (not
+  // the XML body); the body ETag is also emitted for interoperability.
+  return new Response(xml, { status: 200, headers: { ...XML_HEADERS, 'ETag': `"${etag}"` } })
 }
 
 export function completeMultipartXml(bucket: string, key: string, etag: string, region = 'us-east-1'): Response {

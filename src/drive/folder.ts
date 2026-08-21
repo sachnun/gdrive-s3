@@ -5,7 +5,7 @@ import { DriveError } from './errors'
 
 export const FOLDER_MIME = 'application/vnd.google-apps.folder'
 const CACHE_TTL = 3600
-const LOCK_TTL = 30
+const LOCK_TTL = 60
 
 export function escQuery(s: string): string {
   return s.replace(/\\/g, '\\\\').replace(/'/g, "\\'")

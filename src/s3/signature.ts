@@ -55,13 +55,17 @@ function canonicalQueryString(rawQuery: string, exclude: Set<string>): string {
   return pairs.map((p) => `${p.k}=${p.v}`).join('&')
 }
 
-function buildCanonicalHeaders(headers: Headers, signedList: string[]): string {
+function buildCanonicalHeaders(
+  headers: Headers,
+  signedList: string[],
+  overrides: Record<string, string> = {},
+): string {
   return signedList
     .map((h) => h.trim())
     .filter(Boolean)
     .sort()
     .map((h) => {
-      const v = headers.get(h) ?? ''
+      const v = overrides[h] ?? headers.get(h) ?? ''
       return `${h}:${v.replace(/\s+/g, ' ').trim()}\n`
     })
     .join('')
@@ -171,32 +175,52 @@ export async function verifySignature(env: Env, req: Request): Promise<SigResult
   }
 
   const canonicalPayloadHash = payloadHashHint ?? 'UNSIGNED-PAYLOAD'
-
-  const canonicalRequest = [
-    method,
-    rawPath === '' ? '/' : rawPath,
-    canonicalQueryString(rawQuery, isPresigned ? new Set(['X-Amz-Signature', 'x-amz-signature']) : new Set()),
-    buildCanonicalHeaders(headers, signedList),
-    signedList.join(';'),
-    canonicalPayloadHash,
-  ].join('\n')
-
-  const stringToSign = [
-    'AWS4-HMAC-SHA256',
-    amzDate,
-    `${scopeDate}/${scopeRegion}/s3/aws4_request`,
-    await sha256hex(canonicalRequest),
-  ].join('\n')
+  const excludeQuery: Set<string> = isPresigned
+    ? new Set(['X-Amz-Signature', 'x-amz-signature'])
+    : new Set()
 
   const signingKey = await deriveSigningKey(env.SECRET_KEY, scopeDate, scopeRegion)
-  const expected = hex(await hmac(signingKey, stringToSign))
 
-  if (!timingSafeEqualHex(expected, signature.toLowerCase())) {
-    return err(
-      403,
-      'SignatureDoesNotMatch',
-      'The request signature we calculated does not match the signature you provided. Check your key and signing method.',
-    )
+  /**
+   * Edge/CDN proxies (e.g. Cloudflare) rewrite `Accept-Encoding` in flight
+   * (`identity` -> `gzip, br`), breaking clients that signed it (Go SDKs,
+   * rclone). The signature stays bound to the key, method, path, date and all
+   * other signed headers, so also accept the common rewrites of that one header.
+   */
+  const variations: { list: string[]; overrides: Record<string, string> }[] = [{ list: signedList, overrides: {} }]
+  if (signedList.includes('accept-encoding')) {
+    // Go SDK clients sign Accept-Encoding as `identity` (HEAD) or `gzip` (GET);
+    // Cloudflare rewrites both to `gzip, br` in flight. Cover the common rewrites.
+    for (const v of ['identity', 'gzip', 'gzip, br', 'br, gzip', 'br', 'deflate', '']) {
+      variations.push({ list: signedList, overrides: { 'accept-encoding': v } })
+    }
+    variations.push({ list: signedList.filter((h) => h !== 'accept-encoding'), overrides: {} })
   }
-  return { ok: true }
+
+  for (const { list, overrides } of variations) {
+    const canonicalRequest = [
+      method,
+      rawPath === '' ? '/' : rawPath,
+      canonicalQueryString(rawQuery, excludeQuery),
+      buildCanonicalHeaders(headers, list, overrides),
+      list.join(';'),
+      canonicalPayloadHash,
+    ].join('\n')
+    const stringToSign = [
+      'AWS4-HMAC-SHA256',
+      amzDate,
+      `${scopeDate}/${scopeRegion}/s3/aws4_request`,
+      await sha256hex(canonicalRequest),
+    ].join('\n')
+    const expected = hex(await hmac(signingKey, stringToSign))
+    if (timingSafeEqualHex(expected, signature.toLowerCase())) {
+      return { ok: true }
+    }
+  }
+
+  return err(
+    403,
+    'SignatureDoesNotMatch',
+    'The request signature we calculated does not match the signature you provided. Check your key and signing method.',
+  )
 }

@@ -1,5 +1,5 @@
 import type { Env } from '../env'
-import { randomHex } from '../util'
+import { randomHex, sha256Hex } from '../util'
 import { DRIVE_API, driveFetch } from './auth'
 import { DriveError } from './errors'
 import { FOLDER_MIME, findFolder, getOrCreateFolder } from './folder'
@@ -79,9 +79,10 @@ export async function uploadPart(
     size,
     appProperties: { partNumber: n, uploadId },
   })
-  state.parts[n] = { fileId: meta.id, size: meta.size ? Number(meta.size) : (size ?? 0), etag: meta.id }
+  const etag = await sha256Hex(meta.id)
+  state.parts[n] = { fileId: meta.id, size: meta.size ? Number(meta.size) : (size ?? 0), etag }
   await env.FOLDER_CACHE.put(stateKey(uploadId), JSON.stringify(state))
-  return { etag: meta.id }
+  return { etag }
 }
 
 /** Re-syncs the part list from the temp folder so KV loss/races cannot lose parts. */
@@ -99,7 +100,7 @@ async function reconcileParts(env: Env, state: MultipartState): Promise<void> {
     }
     for (const f of data.files) {
       const n = f.appProperties?.partNumber
-      if (n) state.parts[n] = { fileId: f.id, size: f.size ? Number(f.size) : 0, etag: f.id }
+      if (n) state.parts[n] = { fileId: f.id, size: f.size ? Number(f.size) : 0, etag: await sha256Hex(f.id) }
     }
     pageToken = data.nextPageToken
     if (!pageToken) break
@@ -143,17 +144,26 @@ export async function completeMultipart(
   if (ordered.length === 0) {
     finalMeta = await uploadToSession(env, location, null, 0, state.contentType)
   } else {
+    let offset = 0
     for (const p of ordered) {
       const partRes = await driveFetch(env, `${DRIVE_API}/drive/v3/files/${p.fileId}?alt=media&supportsAllDrives=true`)
       if (!partRes.ok) {
         throw new DriveError(500, 'InternalError', `read part ${p.partNumber} failed (HTTP ${partRes.status})`)
       }
+      // Drive resumable sessions can be fed in multiple sequential PUTs, but each
+      // must declare its byte range via Content-Range (otherwise Drive restarts at 0).
+      const end = offset + p.size - 1
       const up = await driveFetch(env, location, {
         method: 'PUT',
-        headers: { 'Content-Length': String(p.size), 'Content-Type': 'application/octet-stream' },
+        headers: {
+          'Content-Length': String(p.size),
+          'Content-Type': 'application/octet-stream',
+          'Content-Range': `bytes ${offset}-${end}/${totalSize}`,
+        },
         body: partRes.body,
         duplex: 'half',
       } as RequestInit)
+      offset += p.size
       if (up.status === 200 || up.status === 201) {
         finalMeta = (await up.json()) as FileMeta
       } else if (up.status !== 308) {

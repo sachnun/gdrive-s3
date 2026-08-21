@@ -16,3 +16,9 @@ export function sleep(ms: number): Promise<void> {
 export function requestId(): string {
   return randomHex(8)
 }
+
+/** SHA-256 hex digest of a string (first 32 chars → MD5-sized opaque ETag). */
+export async function sha256Hex(input: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input))
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
+}

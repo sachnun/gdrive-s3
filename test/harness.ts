@@ -332,6 +332,9 @@ export class FakeKV {
   }
 
   async put(key: string, value: string, opts?: { expirationTtl?: number }): Promise<void> {
+    if (opts?.expirationTtl !== undefined && opts.expirationTtl < 60) {
+      throw new Error('KV PUT failed: expiration_ttl must be at least 60')
+    }
     this.store.set(key, {
       value,
       expiry: opts?.expirationTtl !== undefined ? Date.now() + opts.expirationTtl * 1000 : undefined,
