@@ -64,6 +64,7 @@ Google Drive API (Drive v3)
    wrangler secret put GOOGLE_CLIENT_SECRET
    wrangler secret put GOOGLE_REFRESH_TOKEN
    wrangler secret put ALLOWED_BUCKETS        # e.g. "my-bucket,public" (or a var)
+   #                                           # "*" = allow any bucket (root-credential semantics)
    wrangler secret put PUBLIC_READ_BUCKETS    # optional: "public" (subset of allowed)
    ```
 

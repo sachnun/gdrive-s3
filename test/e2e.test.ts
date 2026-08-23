@@ -234,6 +234,34 @@ describe('S3 e2e (aws4fetch as client)', () => {
     expect(await res.text()).toContain('AccessDenied')
   })
 
+  it('wildcard ALLOWED_BUCKETS grants full access (AWS root semantics)', async () => {
+    const w = await setupTest({ ALLOWED_BUCKETS: '*' })
+    try {
+      expect((await s3(w, 'PUT', '/anything-goes')).status).toBe(200)
+      expect((await s3(w, 'HEAD', '/anything-goes')).status).toBe(200)
+      const lb = await s3(w, 'GET', '/')
+      const xml = await lb.text()
+      expect(xml).toContain('<Name>anything-goes</Name>')
+      // internal multipart storage must never surface as a bucket
+      expect(xml).not.toContain('.gdrive-s3-multipart')
+    } finally {
+      w.restore()
+    }
+  })
+
+  it('rejects invalid bucket names per AWS naming rules', async () => {
+    const w = await setupTest({ ALLOWED_BUCKETS: '*' })
+    try {
+      for (const name of ['ab', 'Upper-case', 'double..dot', '-leadingdash', 'trailingdash-', 'x'.repeat(64)]) {
+        const res = await s3(w, 'PUT', `/${name}`)
+        expect(res.status, name).toBe(400)
+        expect(await res.text(), name).toContain('InvalidBucketName')
+      }
+    } finally {
+      w.restore()
+    }
+  })
+
   it('presigned PUT then GET works end to end', async () => {
     await s3(ctx, 'PUT', '/test-bucket', {})
     const put = await s3Presigned(ctx, 'PUT', '/test-bucket/pre.txt', { body: 'presigned content' })

@@ -5,7 +5,7 @@ import { DriveError } from './drive/errors'
 import { FOLDER_MIME, findCachedFolder, findFolder, getOrCreateFolder, resolveExistingPath, resolvePathCreate } from './drive/folder'
 import { copyFile, downloadFile, findFilesInFolder, getFileMeta, trashFile, uploadFile } from './drive/files'
 import { abortMultipart, completeMultipart, createMultipart, gcMultipart, uploadPart } from './drive/multipart'
-import { checkBucket, isPublicReadBucket, parseRequest, verifyRequest } from './middleware'
+import { checkBucket, isPublicReadBucket, MULTIPART_ROOT, parseRequest, verifyRequest } from './middleware'
 import { listObjects, type ListOptions } from './s3/list'
 import * as xml from './s3/xml'
 import { decodeAwsChunked, isAwsChunked } from './s3/chunked'
@@ -124,6 +124,7 @@ async function dispatch(
 
 async function handleListBuckets(env: Env): Promise<Response> {
   const allowed = (env.ALLOWED_BUCKETS ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+  const wildcard = allowed.includes('*')
   const buckets: { name: string; creationDate: string }[] = []
   const found = new Set<string>()
   let pageToken: string | undefined
@@ -135,7 +136,9 @@ async function handleListBuckets(env: Env): Promise<Response> {
     if (!res.ok) throw new DriveError(500, 'InternalError', `bucket list failed (HTTP ${res.status})`)
     const data = (await res.json()) as { nextPageToken?: string; files: { id: string; name: string; createdTime: string }[] }
     for (const f of data.files) {
-      if (allowed.includes(f.name) && !found.has(f.name)) {
+      // Internal multipart temp storage is never exposed as a bucket.
+      if (f.name === MULTIPART_ROOT) continue
+      if ((wildcard || allowed.includes(f.name)) && !found.has(f.name)) {
         buckets.push({ name: f.name, creationDate: f.createdTime })
         found.add(f.name)
       }
@@ -167,6 +170,13 @@ async function handleHeadBucket(env: Env, bucket: string): Promise<Response> {
 }
 
 async function handleCreateBucket(env: Env, bucket: string): Promise<Response> {
+  // AWS S3 naming rules: 3-63 chars, lowercase letters/digits/dots/hyphens,
+  // must begin and end with a letter or digit.
+  // https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html
+  if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket) || bucket.includes('..')) {
+    return xml.s3Error(400, 'InvalidBucketName', 'The specified bucket is not valid.', `/${bucket}`, requestId())
+  }
+  // us-east-1 legacy semantics: re-creating an owned bucket returns 200 OK.
   await getOrCreateFolder(env, bucket, null)
   return new Response(null, { status: 200, headers: { 'x-amz-request-id': requestId() } })
 }

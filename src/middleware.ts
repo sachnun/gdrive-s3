@@ -2,6 +2,8 @@ import type { Env } from './env'
 import { verifySignature, type SigResult } from './s3/signature'
 import { s3Error } from './s3/xml'
 
+export { MULTIPART_ROOT } from './drive/multipart'
+
 /**
  * Parses a path-style request: /<bucket>/<key...>. Returns bucket=null for the
  * root path (ListBuckets). Rejects ".." segments.
@@ -37,11 +39,16 @@ function parseList(s: string | undefined): string[] {
     .filter(Boolean)
 }
 
+/**
+ * Bucket allowlist gate. A "*" entry allows every bucket (AWS root-credential
+ * semantics: any authenticated principal may create/access any bucket).
+ */
 export function checkBucket(
   env: Env,
   bucket: string,
 ): { ok: true } | { ok: false; response: Response } {
-  if (!parseList(env.ALLOWED_BUCKETS).includes(bucket)) {
+  const allowed = parseList(env.ALLOWED_BUCKETS)
+  if (!allowed.includes('*') && !allowed.includes(bucket)) {
     return { ok: false, response: s3Error(403, 'AccessDenied', 'Access Denied', `/${bucket}`) }
   }
   return { ok: true }
