@@ -16,7 +16,7 @@
   ],
   "vars": {
     "REGION": "us-east-1",
-    "ALLOWED_BUCKETS": "my-bucket",
+    "ALLOWED_BUCKETS": "*",
     "PUBLIC_READ_BUCKETS": ""
   }
   // "r2_buckets": [
