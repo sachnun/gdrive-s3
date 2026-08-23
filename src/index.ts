@@ -5,6 +5,7 @@ import { DriveError } from './drive/errors'
 import { FOLDER_MIME, findCachedFolder, findFolder, getOrCreateFolder, resolveExistingPath, resolvePathCreate } from './drive/folder'
 import { copyFile, downloadFile, findFilesInFolder, getFileMeta, trashFile, uploadFile } from './drive/files'
 import { abortMultipart, completeMultipart, createMultipart, gcMultipart, uploadPart } from './drive/multipart'
+import { cachePublicGet, matchPublicGet, purgePublicCache } from './edge-cache'
 import { checkBucket, isPublicReadBucket, MULTIPART_ROOT, parseRequest, verifyRequest } from './middleware'
 import { listObjects, type ListOptions } from './s3/list'
 import * as xml from './s3/xml'
@@ -37,6 +38,11 @@ app.all('*', async (c) => {
       // unavailable outside Workers (tests) — background work runs fire-and-forget
     }
     const res = await dispatch(env, req, method, rawPath, params, execCtx)
+    const purge = purgeAfterWrite(env, method, rawPath)
+    if (purge) {
+      if (execCtx) execCtx.waitUntil(purge)
+      else void purge.catch(() => {})
+    }
     return withCors(req, res)
   } catch (err) {
     if (err instanceof DriveError) {
@@ -110,9 +116,9 @@ async function dispatch(
     case 'PUT':
       return handlePutObject(env, req, bucket, key)
     case 'GET':
-      return handleGetObject(env, req, bucket, key)
+      return handleGetObject(env, req, bucket, key, rawPath, execCtx)
     case 'HEAD':
-      return handleHeadObject(env, bucket, key)
+      return handleHeadObject(env, bucket, key, rawPath)
     case 'DELETE':
       return handleDeleteObject(env, bucket, key)
     default:
@@ -277,10 +283,22 @@ async function handleCopyObject(
   return xml.copyObjectXml(copied.id, copied.modifiedTime ?? new Date().toISOString())
 }
 
-async function handleGetObject(env: Env, req: Request, bucket: string, key: string): Promise<Response> {
+async function handleGetObject(
+  env: Env,
+  req: Request,
+  bucket: string,
+  key: string,
+  rawPath: string,
+  execCtx?: WaitUntilCtx,
+): Promise<Response> {
+  const range = req.headers.get('range')
+  const cacheable = !range && isPublicReadBucket(env, bucket)
+  if (cacheable) {
+    const hit = await matchPublicGet(env, bucket, rawPath)
+    if (hit) return hit
+  }
   const file = await findObject(env, bucket, key)
   if (!file) return xml.s3Error(404, 'NoSuchKey', 'The specified key does not exist.', `/${bucket}/${key}`, requestId())
-  const range = req.headers.get('range')
   const res = await downloadFile(env, file.id, range)
   if (res.status === 404) {
     return xml.s3Error(404, 'NoSuchKey', 'The specified key does not exist.', `/${bucket}/${key}`, requestId())
@@ -303,10 +321,25 @@ async function handleGetObject(env: Env, req: Request, bucket: string, key: stri
   if (res.status !== 200) {
     throw new DriveError(502, 'InternalError', `Drive download failed (HTTP ${res.status})`)
   }
-  return new Response(res.body, { status: 200, headers })
+  let response = new Response(res.body, { status: 200, headers })
+  if (cacheable) {
+    const cached = cachePublicGet(env, bucket, rawPath, response)
+    if (cached) {
+      if (execCtx) execCtx.waitUntil(cached.stored)
+      else void cached.stored.catch(() => {})
+      response = cached.response
+    }
+  }
+  return response
 }
 
-async function handleHeadObject(env: Env, bucket: string, key: string): Promise<Response> {
+async function handleHeadObject(env: Env, bucket: string, key: string, rawPath: string): Promise<Response> {
+  // Serve from the edge-cache entry when present (avoids the Drive metadata
+  // round-trip for public buckets).
+  if (isPublicReadBucket(env, bucket)) {
+    const hit = await matchPublicGet(env, bucket, rawPath)
+    if (hit) return new Response(null, { status: 200, headers: new Headers(hit.headers) })
+  }
   const file = await findObject(env, bucket, key)
   if (!file) return xml.s3Error(404, 'NoSuchKey', 'The specified key does not exist.', `/${bucket}/${key}`, requestId())
   const headers: Record<string, string> = {
@@ -497,6 +530,18 @@ function withCors(req: Request, res: Response): Response {
   headers.set('Access-Control-Allow-Origin', '*')
   headers.set('Access-Control-Expose-Headers', 'ETag, Content-Length, Content-Range, Accept-Ranges')
   return new Response(res.body, { status: res.status, statusText: res.statusText, headers })
+}
+
+/**
+ * Purges the edge-cache entry after a mutating request on a public-read
+ * bucket. Bucket-level DeleteObjects (?delete on the root path) cannot be
+ * mapped to individual keys here — those entries expire via TTL instead.
+ */
+function purgeAfterWrite(env: Env, method: string, rawPath: string): Promise<void> | null {
+  if (method !== 'PUT' && method !== 'POST' && method !== 'DELETE') return null
+  const { bucket, key } = parseRequest(rawPath)
+  if (!bucket || !key || !isPublicReadBucket(env, bucket)) return null
+  return purgePublicCache(env, rawPath)
 }
 
 function preflightResponse(): Response {

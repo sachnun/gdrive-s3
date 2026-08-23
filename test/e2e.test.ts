@@ -2,6 +2,25 @@ import { AwsClient } from 'aws4fetch'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ACCESS_KEY, bucketRootId, s3, s3Presigned, setupTest, xmlTag, type TestSetup } from './helpers'
 
+/** Installs an in-memory Cache API so edge-cache code paths run under Node. */
+function installMemoryCache(): () => void {
+  const store = new Map<string, Response>()
+  ;(globalThis as { caches?: unknown }).caches = {
+    default: {
+      match: async (req: Request) => store.get(req.url),
+      put: async (req: Request, res: Response) => {
+        store.set(req.url, new Response(await res.text(), { status: res.status, headers: res.headers }))
+      },
+      delete: async (req: Request) => store.delete(req.url),
+    },
+  }
+  return () => {
+    delete (globalThis as { caches?: unknown }).caches
+  }
+}
+
+const tick = () => new Promise((r) => setTimeout(r, 0))
+
 describe('S3 e2e (aws4fetch as client)', () => {
   let ctx: TestSetup
 
@@ -213,6 +232,59 @@ describe('S3 e2e (aws4fetch as client)', () => {
     await s3(ctx, 'PUT', '/test-bucket/priv.txt', { body: 'closed' })
     const privateGet = await ctx.app.fetch(new Request('http://localhost/test-bucket/priv.txt', { method: 'GET' }), ctx.env)
     expect(privateGet.status).toBe(403)
+  })
+
+  it('public bucket GET is edge-cached and purged on overwrite', async () => {
+    const removeCache = installMemoryCache()
+    try {
+      await s3(ctx, 'PUT', '/public-bucket', {})
+      await s3(ctx, 'PUT', '/public-bucket/pub.txt', { body: 'v1' })
+
+      let driveDownloads = 0
+      const inner = globalThis.fetch
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).includes('alt=media')) driveDownloads++
+        return inner(input, init)
+      }) as typeof fetch
+
+      const get = () => ctx.app.fetch(new Request('http://localhost/public-bucket/pub.txt', { method: 'GET' }), ctx.env)
+
+      // First GET goes to Drive and populates the cache.
+      expect(await (await get()).text()).toBe('v1')
+      await tick()
+      // Second GET is served from the cache without touching Drive.
+      const r2 = await get()
+      expect(await r2.text()).toBe('v1')
+      expect(r2.headers.get('Cache-Control')).toContain('max-age=300')
+      expect(driveDownloads).toBe(1)
+
+      // Overwrite purges the entry; the next GET fetches fresh content.
+      await s3(ctx, 'PUT', '/public-bucket/pub.txt', { body: 'v2' })
+      await tick()
+      expect(await (await get()).text()).toBe('v2')
+      expect(driveDownloads).toBe(2)
+    } finally {
+      removeCache()
+    }
+  })
+
+  it('range GETs on public buckets bypass the edge cache', async () => {
+    const removeCache = installMemoryCache()
+    try {
+      await s3(ctx, 'PUT', '/public-bucket', {})
+      await s3(ctx, 'PUT', '/public-bucket/range.txt', { body: 'abcdef' })
+      const r = await ctx.app.fetch(
+        new Request('http://localhost/public-bucket/range.txt', { headers: { Range: 'bytes=0-2' } }),
+        ctx.env,
+      )
+      expect(r.status).toBe(206)
+      expect(await r.text()).toBe('abc')
+      // Nothing was cached by the range request.
+      const full = await ctx.app.fetch(new Request('http://localhost/public-bucket/range.txt', { method: 'GET' }), ctx.env)
+      expect(await full.text()).toBe('abcdef')
+    } finally {
+      removeCache()
+    }
   })
 
   it('rejects unsigned writes and wrong signatures', async () => {

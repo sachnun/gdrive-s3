@@ -18,6 +18,10 @@
     "REGION": "us-east-1",
     "ALLOWED_BUCKETS": "*",
     "PUBLIC_READ_BUCKETS": ""
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
   }
   // "r2_buckets": [
   //   {
@@ -34,9 +38,5 @@
   // ],
   // "ai": {
   //   "binding": "AI"
-  // },
-  // "observability": {
-  //   "enabled": true,
-  //   "head_sampling_rate": 1
   // }
 }

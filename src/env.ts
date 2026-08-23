@@ -19,6 +19,8 @@ export interface Env {
   ALLOWED_BUCKETS: string
   /** Optional: comma-separated buckets whose GET/HEAD skip signature verification. */
   PUBLIC_READ_BUCKETS?: string
+  /** Optional: edge-cache TTL in seconds for public-read object GETs (default 300). */
+  PUBLIC_CACHE_TTL?: string
   /** KV namespace caching the Drive OAuth access token. */
   AUTH_KV: KVNamespace
   /** KV namespace caching Drive folder IDs (and multipart session state). */
