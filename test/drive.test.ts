@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { DRIVE_API, driveFetch, getAccessToken, parseServiceAccounts } from '../src/drive/auth'
+import { DRIVE_API, driveFetch, getAccessToken, invalidateTokenCache, parseServiceAccounts } from '../src/drive/auth'
 import { FOLDER_MIME, findFolder, getOrCreateFolder, resolveExistingPath, resolvePathCreate } from '../src/drive/folder'
 import { downloadFile, findFilesInFolder, trashFile, uploadFile } from '../src/drive/files'
 import { FakeDrive, makeEnv, makeFetchStub } from './harness'
@@ -10,6 +10,7 @@ describe('drive auth (KV-backed token)', () => {
   let restore: () => void
 
   beforeEach(() => {
+    invalidateTokenCache() // memo is module-level; reset so each test starts cold
     drive = new FakeDrive()
     stub = makeFetchStub(drive)
     restore = globalThis.fetch as unknown as () => void
@@ -55,6 +56,7 @@ describe('drive auth with service accounts (JWT bearer)', () => {
   let restore: () => void
 
   beforeEach(() => {
+    invalidateTokenCache() // memo is module-level; reset so each test starts cold
     drive = new FakeDrive()
     stub = makeFetchStub(drive)
     restore = globalThis.fetch as unknown as () => void

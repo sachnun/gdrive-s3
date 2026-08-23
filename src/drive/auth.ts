@@ -129,6 +129,33 @@ const saCache = new Map<string, { at: number; list: ServiceAccount[] }>()
 let rrIndex = 0
 
 /**
+ * Per-isolate access-token memo. Skips the AUTH_KV read on every driveFetch
+ * (~10–50 ms each); TTL stays well under Google's ~1 h token lifetime, and the
+ * 401 retry path clears it so a revoked token can never stick.
+ */
+const MEM_TOKEN_TTL_MS = 10 * 60 * 1000
+const memTokens = new Map<string, { token: string; at: number }>()
+
+function memoGetToken(key: string): string | null {
+  const hit = memTokens.get(key)
+  if (!hit) return null
+  if (Date.now() - hit.at >= MEM_TOKEN_TTL_MS) {
+    memTokens.delete(key)
+    return null
+  }
+  return hit.token
+}
+
+function memoPutToken(key: string, token: string): void {
+  memTokens.set(key, { token, at: Date.now() })
+}
+
+/** Drops all memoized access tokens (called when Drive rejects one with 401). */
+export function invalidateTokenCache(): void {
+  memTokens.clear()
+}
+
+/**
  * Loads the service-account list from the env var, falling back to the AUTH_KV
  * key `service_accounts` (for payloads larger than the 5 KB secret limit).
  */
@@ -143,7 +170,7 @@ async function loadServiceAccounts(env: Env): Promise<ServiceAccount[]> {
   return list
 }
 
-/** Round-robins service accounts, caching each account's token in KV. */
+/** Round-robins service accounts, caching each account's token in KV + memory. */
 async function getServiceAccountToken(env: Env): Promise<string> {
   const list = await loadServiceAccounts(env)
   if (list.length === 0) {
@@ -151,10 +178,16 @@ async function getServiceAccountToken(env: Env): Promise<string> {
   }
   const sa = list[rrIndex++ % list.length]
   const cacheKey = `sa_token:${sa.clientEmail}`
+  const memo = memoGetToken(cacheKey)
+  if (memo) return memo
   const cached = await env.AUTH_KV.get(cacheKey)
-  if (cached) return cached
+  if (cached) {
+    memoPutToken(cacheKey, cached)
+    return cached
+  }
   const { token, expiresIn } = await serviceAccountToken(env, sa)
   await env.AUTH_KV.put(cacheKey, token, { expirationTtl: Math.max(60, expiresIn - 60) })
+  memoPutToken(cacheKey, token)
   return token
 }
 
@@ -165,10 +198,16 @@ async function getServiceAccountToken(env: Env): Promise<string> {
  */
 export async function getAccessToken(env: Env): Promise<string> {
   if (!env.GOOGLE_REFRESH_TOKEN) return getServiceAccountToken(env)
+  const memo = memoGetToken(TOKEN_KEY)
+  if (memo) return memo
   const cached = await env.AUTH_KV.get(TOKEN_KEY)
-  if (cached) return cached
+  if (cached) {
+    memoPutToken(TOKEN_KEY, cached)
+    return cached
+  }
   const { token, expiresIn } = await refreshAccessToken(env)
   await env.AUTH_KV.put(TOKEN_KEY, token, { expirationTtl: Math.max(60, expiresIn - 60) })
+  memoPutToken(TOKEN_KEY, token)
   return token
 }
 
@@ -182,6 +221,7 @@ export async function driveFetch(env: Env, url: string, init: RequestInit = {}, 
   if (!headers.has('Authorization')) headers.set('Authorization', `Bearer ${token}`)
   const res = await fetch(url, { ...init, headers })
   if (res.status === 401 && !retried) {
+    invalidateTokenCache()
     await env.AUTH_KV.delete(TOKEN_KEY)
     const listed = await env.AUTH_KV.list({ prefix: 'sa_token:' })
     for (const k of listed.keys) await env.AUTH_KV.delete(k.name)

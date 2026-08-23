@@ -2,6 +2,7 @@ import type { Env } from '../env'
 import { DRIVE_API, UPLOAD_API, driveFetch } from './auth'
 import { DriveError } from './errors'
 import { FOLDER_MIME, escQuery } from './folder'
+import { randomHex } from '../util'
 
 export interface FileMeta {
   id: string
@@ -67,6 +68,13 @@ export async function uploadToSession(
   throw new DriveError(500, 'InternalError', `resumable upload failed (HTTP ${res.status})`)
 }
 
+/**
+ * Uploads a file to Drive.
+ *
+ * With `data` (fully-buffered body, caller-checked ≤4 MiB): single-shot
+ * `uploadType=multipart` — one Drive round trip instead of the two that a
+ * resumable session costs. Otherwise: streaming resumable upload.
+ */
 export async function uploadFile(
   env: Env,
   args: {
@@ -76,15 +84,49 @@ export async function uploadFile(
     contentType?: string
     size?: number
     appProperties?: Record<string, string>
+    data?: Uint8Array
   },
 ): Promise<FileMeta> {
-  const { parentId, name, body, contentType, size, appProperties } = args
+  const { parentId, name, body, contentType, size, appProperties, data } = args
+  if (data) return uploadSingleShot(env, args, data)
   const location = await createResumableSession(
     env,
     { name, parents: [parentId], mimeType: contentType, appProperties },
     size,
   )
   return uploadToSession(env, location, body, size, contentType)
+}
+
+/** One-request upload (metadata + content as multipart/related); ≤5 MiB only. */
+async function uploadSingleShot(
+  env: Env,
+  args: { parentId: string; name: string; contentType?: string; appProperties?: Record<string, string> },
+  content: Uint8Array,
+): Promise<FileMeta> {
+  const boundary = 'gds3' + randomHex(16)
+  const metadata: Record<string, unknown> = { name: args.name, parents: [args.parentId] }
+  if (args.contentType) metadata.mimeType = args.contentType
+  if (args.appProperties) metadata.appProperties = args.appProperties
+  const enc = new TextEncoder()
+  const head = enc.encode(
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n--${boundary}\r\nContent-Type: ${args.contentType ?? 'application/octet-stream'}\r\n\r\n`,
+  )
+  const tail = enc.encode(`\r\n--${boundary}--\r\n`)
+  const body = new Uint8Array(head.length + content.length + tail.length)
+  body.set(head, 0)
+  body.set(content, head.length)
+  body.set(tail, head.length + content.length)
+  const res = await driveFetch(
+    env,
+    `${UPLOAD_API}/files?uploadType=multipart&fields=${encodeURIComponent(FILE_FIELDS)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+      body,
+    },
+  )
+  if (!res.ok) throw new DriveError(500, 'InternalError', `upload failed (HTTP ${res.status})`)
+  return (await res.json()) as FileMeta
 }
 
 /** Streams file content; optionally forwards a Range header (Drive supports it). */

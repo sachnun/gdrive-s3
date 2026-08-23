@@ -26,7 +26,8 @@ export async function findFolder(env: Env, name: string, parentId: string | null
   return data.files[0]?.id ?? null
 }
 
-async function findCachedFolder(env: Env, name: string, parentId: string | null): Promise<string | null> {
+/** Cached lookup (KV, 1h TTL): returns the Drive folder id or null if absent. */
+export async function findCachedFolder(env: Env, name: string, parentId: string | null): Promise<string | null> {
   const cacheKey = folderCacheKey(parentId, name)
   const cached = await env.FOLDER_CACHE.get(cacheKey)
   if (cached) return cached

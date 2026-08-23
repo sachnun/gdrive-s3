@@ -55,6 +55,14 @@ function concatBytes(chunks: Uint8Array[]): Uint8Array {
   return out
 }
 
+function indexOfSeq(haystack: Uint8Array, needle: Uint8Array, from: number): number {
+  outer: for (let i = Math.max(from, 0); i <= haystack.length - needle.length; i++) {
+    for (let j = 0; j < needle.length; j++) if (haystack[i + j] !== needle[j]) continue outer
+    return i
+  }
+  return -1
+}
+
 function toFile(f: FakeDriveFile): Record<string, unknown> {
   const base: Record<string, unknown> = {
     id: f.id,
@@ -192,6 +200,37 @@ export function makeFetchStub(drive: FakeDrive, opts: StubOptions = {}): FetchSt
 
     const path = url.pathname
     if (path.startsWith('/upload/drive/v3/files')) {
+      if (method === 'POST' && url.searchParams.get('uploadType') === 'multipart') {
+        // Single-shot upload: multipart/related with a JSON metadata part and a
+        // binary content part delimited by the request's boundary.
+        const raw = await readBody(body)
+        const ct = headers.get('content-type') ?? ''
+        const boundary = /boundary=([^;\s]+)/.exec(ct)?.[1]
+        if (!boundary) return new Response('missing boundary', { status: 400 })
+        const marker = new TextEncoder().encode(`\r\n--${boundary}`)
+        const findMarker = (from: number): number => {
+          outer: for (let i = from; i <= raw.length - marker.length; i++) {
+            for (let j = 0; j < marker.length; j++) if (raw[i + j] !== marker[j]) continue outer
+            return i
+          }
+          return -1
+        }
+        const jsonHdrEnd = indexOfSeq(raw, new TextEncoder().encode('\r\n\r\n'), 0)
+        const metaStart = jsonHdrEnd + 4
+        const metaEnd = findMarker(metaStart)
+        const metadata = JSON.parse(new TextDecoder().decode(raw.subarray(metaStart, metaEnd))) as Session['metadata']
+        const contentHdrEnd = indexOfSeq(raw, new TextEncoder().encode('\r\n\r\n'), metaEnd + marker.length)
+        const contentStart = contentHdrEnd + 4
+        const contentEnd = findMarker(contentStart)
+        const f = drive.addFile({
+          name: metadata.name,
+          mimeType: metadata.mimeType ?? 'application/octet-stream',
+          parents: metadata.parents ?? ['root'],
+          appProperties: metadata.appProperties,
+          content: raw.slice(contentStart, contentEnd),
+        })
+        return new Response(JSON.stringify(toFile(f)), { status: 201, headers: { 'Content-Type': 'application/json' } })
+      }
       if (method === 'POST') {
         const metadata = JSON.parse(new TextDecoder().decode(await readBody(body)))
         const sessionId = `session_${drive.newSeq()}`

@@ -2,16 +2,21 @@ import { Hono } from 'hono'
 import type { Env } from './env'
 import { DRIVE_API, driveFetch } from './drive/auth'
 import { DriveError } from './drive/errors'
-import { FOLDER_MIME, findFolder, getOrCreateFolder, resolveExistingPath, resolvePathCreate } from './drive/folder'
+import { FOLDER_MIME, findCachedFolder, findFolder, getOrCreateFolder, resolveExistingPath, resolvePathCreate } from './drive/folder'
 import { copyFile, downloadFile, findFilesInFolder, getFileMeta, trashFile, uploadFile } from './drive/files'
 import { abortMultipart, completeMultipart, createMultipart, gcMultipart, uploadPart } from './drive/multipart'
 import { checkBucket, isPublicReadBucket, parseRequest, verifyRequest } from './middleware'
 import { listObjects, type ListOptions } from './s3/list'
 import * as xml from './s3/xml'
 import { decodeAwsChunked, isAwsChunked } from './s3/chunked'
-import { requestId, toHttpDate } from './util'
+import { mapLimit, requestId, toHttpDate } from './util'
 
 const app = new Hono<{ Bindings: Env }>()
+
+/** Minimal execution context: only waitUntil is needed (for background GC). */
+interface WaitUntilCtx {
+  waitUntil(promise: Promise<unknown>): void
+}
 
 app.all('*', async (c) => {
   const env = c.env
@@ -25,7 +30,13 @@ app.all('*', async (c) => {
   if (method === 'OPTIONS') return preflightResponse()
 
   try {
-    const res = await dispatch(env, req, method, rawPath, params)
+    let execCtx: WaitUntilCtx | undefined
+    try {
+      execCtx = c.executionCtx
+    } catch {
+      // unavailable outside Workers (tests) — background work runs fire-and-forget
+    }
+    const res = await dispatch(env, req, method, rawPath, params, execCtx)
     return withCors(req, res)
   } catch (err) {
     if (err instanceof DriveError) {
@@ -45,6 +56,7 @@ async function dispatch(
   method: string,
   rawPath: string,
   params: URLSearchParams,
+  execCtx?: WaitUntilCtx,
 ): Promise<Response> {
   const { bucket, key } = parseRequest(rawPath)
 
@@ -87,7 +99,7 @@ async function dispatch(
 
   // ----- object-level operations -----
   const isUploadMethod = method === 'PUT' || method === 'POST'
-  if (isUploadMethod && params.has('uploads')) return handleCreateMultipart(env, req, bucket, key)
+  if (isUploadMethod && params.has('uploads')) return handleCreateMultipart(env, req, bucket, key, execCtx)
   if (params.has('uploadId')) {
     if (params.has('partNumber') && method === 'PUT') return handleUploadPart(env, req, bucket, key, params)
     if (method === 'POST') return handleCompleteMultipart(env, req, bucket, key, params)
@@ -149,7 +161,7 @@ async function handleListBuckets(env: Env): Promise<Response> {
 }
 
 async function handleHeadBucket(env: Env, bucket: string): Promise<Response> {
-  const id = await findFolder(env, bucket, null)
+  const id = await findCachedFolder(env, bucket, null)
   if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
   return new Response(null, { status: 200, headers: { 'x-amz-request-id': requestId() } })
 }
@@ -160,13 +172,13 @@ async function handleCreateBucket(env: Env, bucket: string): Promise<Response> {
 }
 
 async function handleGetBucketLocation(env: Env, bucket: string): Promise<Response> {
-  const id = await findFolder(env, bucket, null)
+  const id = await findCachedFolder(env, bucket, null)
   if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
   return xml.locationXml(env.REGION || 'us-east-1')
 }
 
 async function handleListObjects(env: Env, bucket: string, params: URLSearchParams, isV2: boolean): Promise<Response> {
-  const bucketFolderId = await findFolder(env, bucket, null)
+  const bucketFolderId = await findCachedFolder(env, bucket, null)
   const maxKeysRaw = parseInt(params.get('max-keys') ?? '1000', 10)
   const maxKeys = isNaN(maxKeysRaw) ? 1000 : Math.min(Math.max(maxKeysRaw, 0), 1000)
   const opts: ListOptions = {
@@ -187,19 +199,24 @@ async function handleListObjects(env: Env, bucket: string, params: URLSearchPara
 async function handleDeleteObjects(env: Env, req: Request, bucket: string): Promise<Response> {
   const body = await req.text()
   const keys = extractXmlKeys(body)
-  const deleted: string[] = []
-  const errors: { key: string; code: string; message: string }[] = []
-  for (const k of keys) {
+  let bucketFolderId: string | null = null
+  if (keys.length > 0) bucketFolderId = await findCachedFolder(env, bucket, null).catch(() => null)
+  const results = await mapLimit(keys, DELETE_OBJECTS_CONCURRENCY, async (k): Promise<boolean> => {
     try {
-      const bucketFolderId = await findFolder(env, bucket, null)
       const target = bucketFolderId ? await resolveExistingPath(env, bucketFolderId, k) : null
       const file = target ? (await findFilesInFolder(env, target.name, target.parentId))[0] : undefined
       if (file) await trashFile(env, file.id)
-      deleted.push(k)
+      return true
     } catch {
-      errors.push({ key: k, code: 'InternalError', message: 'failed to delete object' })
+      return false
     }
-  }
+  })
+  const deleted: string[] = []
+  const errors: { key: string; code: string; message: string }[] = []
+  results.forEach((ok, i) => {
+    if (ok) deleted.push(keys[i])
+    else errors.push({ key: keys[i], code: 'InternalError', message: 'failed to delete object' })
+  })
   return xml.deleteResultXml(deleted, errors)
 }
 
@@ -212,8 +229,9 @@ async function handlePutObject(env: Env, req: Request, bucket: string, key: stri
   const { parentId, name } = await resolvePathCreate(env, bucketFolderId, key)
   const contentType = req.headers.get('content-type') ?? 'application/octet-stream'
   const { body, size } = uploadBody(req)
+  const { body: stream, data } = await bufferIfSmall(body, size)
   const appProperties = metaToAppProperties(req.headers)
-  const meta = await uploadFile(env, { parentId, name, body, contentType, size, appProperties })
+  const meta = await uploadFile(env, { parentId, name, body: stream, contentType, size, appProperties, data })
   await deleteOld(env, parentId, name, meta.id)
   return new Response('', { status: 200, headers: { ETag: `"${meta.id}"`, 'x-amz-request-id': requestId() } })
 }
@@ -234,7 +252,7 @@ async function handleCopyObject(
   const slash = srcPath.indexOf('/')
   const srcBucket = slash === -1 ? srcPath : srcPath.slice(0, slash)
   const srcKey = slash === -1 ? '' : srcPath.slice(slash + 1)
-  const srcBucketFolderId = srcBucket === bucket ? bucketFolderId : await findFolder(env, srcBucket, null)
+  const srcBucketFolderId = srcBucket === bucket ? bucketFolderId : await findCachedFolder(env, srcBucket, null)
   if (!srcBucketFolderId) {
     return xml.s3Error(404, 'NoSuchKey', 'The specified key does not exist.', `/${bucket}/${key}`, requestId())
   }
@@ -301,12 +319,30 @@ async function handleDeleteObject(env: Env, bucket: string, key: string): Promis
 
 // ---------- multipart ----------
 
-async function handleCreateMultipart(env: Env, req: Request, bucket: string, key: string): Promise<Response> {
+/** Bodies at or below this size (and of known length) upload in one Drive request. */
+const SMALL_UPLOAD_MAX = 4 * 1024 * 1024
+/** Max parallel per-key deletions in DeleteObjects (Drive rate limit friendly). */
+const DELETE_OBJECTS_CONCURRENCY = 8
+
+/** Buffers a known-size body ≤ SMALL_UPLOAD_MAX so it can go in one request. */
+async function bufferIfSmall(
+  body: BodyInit | null,
+  size?: number,
+): Promise<{ body: BodyInit | null; data?: Uint8Array }> {
+  if (size === undefined || size > SMALL_UPLOAD_MAX) return { body }
+  const data = new Uint8Array(await new Response(body).arrayBuffer())
+  return { body: null, data }
+}
+
+async function handleCreateMultipart(env: Env, req: Request, bucket: string, key: string, execCtx?: WaitUntilCtx): Promise<Response> {
   const bucketFolderId = await getOrCreateFolder(env, bucket, null)
   const { parentId, name } = await resolvePathCreate(env, bucketFolderId, key)
   const contentType = req.headers.get('content-type') ?? 'application/octet-stream'
   const { uploadId } = await createMultipart(env, { bucket, key, parentId, name, contentType })
-  await gcMultipart(env, bucket)
+  // Best-effort cleanup of abandoned sessions — never block the response on it.
+  const gc = gcMultipart(env, bucket)
+  if (execCtx) execCtx.waitUntil(gc)
+  else void gc.catch(() => {})
   return xml.initiateMultipartXml(bucket, key, uploadId)
 }
 
@@ -323,7 +359,8 @@ async function handleUploadPart(
     return xml.s3Error(400, 'InvalidArgument', 'Invalid partNumber or uploadId', `/${bucket}/${key}`, requestId())
   }
   const { body, size } = uploadBody(req)
-  const { etag } = await uploadPart(env, uploadId, partNumber, body, size)
+  const { body: stream, data } = await bufferIfSmall(body, size)
+  const { etag } = await uploadPart(env, uploadId, partNumber, stream, size, data)
   return xml.uploadPartXml(etag)
 }
 
@@ -360,7 +397,7 @@ async function findObject(
   bucket: string,
   key: string,
 ): Promise<{ id: string; name: string; mimeType: string; size: string; modifiedTime: string; appProperties?: Record<string, string> } | null> {
-  const bucketFolderId = await findFolder(env, bucket, null)
+  const bucketFolderId = await findCachedFolder(env, bucket, null)
   if (!bucketFolderId) return null
   const target = await resolveExistingPath(env, bucketFolderId, key)
   if (!target) return null

@@ -2,7 +2,7 @@ import type { Env } from '../env'
 import { randomHex, sha256Hex } from '../util'
 import { DRIVE_API, driveFetch } from './auth'
 import { DriveError } from './errors'
-import { FOLDER_MIME, findFolder, getOrCreateFolder } from './folder'
+import { FOLDER_MIME, findCachedFolder, getOrCreateFolder } from './folder'
 import { createResumableSession, findFilesInFolder, trashFile, uploadFile, uploadToSession, type FileMeta } from './files'
 
 export const MULTIPART_ROOT = '.gdrive-s3-multipart'
@@ -62,6 +62,7 @@ export async function uploadPart(
   partNumber: number,
   body: BodyInit | null,
   size?: number,
+  data?: Uint8Array,
 ): Promise<{ etag: string }> {
   const state = await getState(env, uploadId)
   const n = String(partNumber)
@@ -78,6 +79,7 @@ export async function uploadPart(
     contentType: 'application/octet-stream',
     size,
     appProperties: { partNumber: n, uploadId },
+    data,
   })
   const etag = await sha256Hex(meta.id)
   state.parts[n] = { fileId: meta.id, size: meta.size ? Number(meta.size) : (size ?? 0), etag }
@@ -117,7 +119,11 @@ export async function completeMultipart(
   requested: { partNumber: number; etag: string }[],
 ): Promise<{ etag: string }> {
   const state = await getState(env, uploadId)
-  await reconcileParts(env, state)
+  // Re-sync from Drive only when the KV state cannot answer by itself: when the
+  // client listed parts that are unknown to us, or sent no part list at all.
+  const needsReconcile =
+    requested.length === 0 || !requested.every((r) => state.parts[String(r.partNumber)])
+  if (needsReconcile) await reconcileParts(env, state)
 
   let ordered: { partNumber: number; fileId: string; size: number }[]
   if (requested.length === 0) {
@@ -196,9 +202,9 @@ export async function abortMultipart(env: Env, uploadId: string): Promise<void> 
  */
 export async function gcMultipart(env: Env, bucket: string): Promise<void> {
   try {
-    const mpRoot = await findFolder(env, MULTIPART_ROOT, null)
+    const mpRoot = await findCachedFolder(env, MULTIPART_ROOT, null)
     if (!mpRoot) return
-    const bucketDir = await findFolder(env, bucket, mpRoot)
+    const bucketDir = await findCachedFolder(env, bucket, mpRoot)
     if (!bucketDir) return
     const cutoff = new Date(Date.now() - GC_AGE_MS).toISOString()
     let pageToken: string | undefined
