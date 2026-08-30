@@ -68,6 +68,21 @@ describe('S3 e2e (aws4fetch as client)', () => {
     expect((await s3(ctx, 'DELETE', '/test-bucket/dir/a.txt')).status).toBe(204)
   })
 
+  it('delete bucket trashes the root folder (DeleteBucket)', async () => {
+    await s3(ctx, 'PUT', '/test-bucket', {})
+    await s3(ctx, 'PUT', '/test-bucket/x.txt', { body: 'x' })
+    expect((await s3(ctx, 'DELETE', '/test-bucket')).status).toBe(204)
+    expect((await s3(ctx, 'HEAD', '/test-bucket')).status).toBe(404)
+    expect((await s3(ctx, 'GET', '/test-bucket/x.txt')).status).toBe(404)
+    expect(ctx.drive.allFiles().find((f) => f.name === 'test-bucket' && !f.trashed)).toBeUndefined()
+  })
+
+  it('delete missing bucket → NoSuchBucket', async () => {
+    const res = await s3(ctx, 'DELETE', '/test-bucket')
+    expect(res.status).toBe(404)
+    expect(await res.text()).toContain('NoSuchBucket')
+  })
+
   it('overwrite semantics: newest content wins, no duplicate Drive files', async () => {
     await s3(ctx, 'PUT', '/test-bucket', {})
     await s3(ctx, 'PUT', '/test-bucket/k.txt', { body: 'v1' })

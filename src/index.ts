@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import type { Env } from './env'
 import { DRIVE_API, driveFetch } from './drive/auth'
 import { DriveError } from './drive/errors'
-import { FOLDER_MIME, findCachedFolder, findFolder, getOrCreateFolder, resolveExistingPath, resolvePathCreate } from './drive/folder'
+import { FOLDER_MIME, findCachedFolder, findFolder, folderCacheKey, getOrCreateFolder, resolveExistingPath, resolvePathCreate } from './drive/folder'
 import { copyFile, downloadFile, findFilesInFolder, getFileMeta, trashFile, uploadFile } from './drive/files'
 import { abortMultipart, completeMultipart, createMultipart, gcMultipart, uploadPart } from './drive/multipart'
 import { cachePublicGet, matchPublicGet, purgePublicCache } from './edge-cache'
@@ -97,7 +97,7 @@ async function dispatch(
         return xml.s3Error(405, 'MethodNotAllowed', 'The specified method is not allowed against this resource.', rawPath, requestId())
       case 'DELETE':
         if (params.has('delete')) return handleDeleteObjects(env, req, bucket)
-        return xml.s3Error(501, 'NotImplemented', 'DeleteBucket is not supported (objects are moved to trash; buckets are never deleted).', rawPath, requestId())
+        return handleDeleteBucket(env, bucket)
       default:
         return xml.s3Error(405, 'MethodNotAllowed', 'The specified method is not allowed against this resource.', rawPath, requestId())
     }
@@ -210,6 +210,14 @@ async function handleListObjects(env: Env, bucket: string, params: URLSearchPara
   }
   const result = await listObjects(env, bucketFolderId, opts)
   return xml.listObjectsXml(opts, result, requestId())
+}
+
+async function handleDeleteBucket(env: Env, bucket: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  await trashFile(env, id)
+  await env.FOLDER_CACHE.delete(folderCacheKey(null, bucket)).catch(() => {})
+  return new Response(null, { status: 204, headers: { 'x-amz-request-id': requestId() } })
 }
 
 async function handleDeleteObjects(env: Env, req: Request, bucket: string): Promise<Response> {
