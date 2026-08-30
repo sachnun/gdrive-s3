@@ -186,6 +186,18 @@ describe('drive folders (KV cache + lock)', () => {
     expect(await findFolder(env, 'missing', null)).toBeNull()
   })
 
+  it('shared-drive mode targets the shared drive root and attaches supportsAllDrives', async () => {
+    const env = makeEnv({ SHARED_DRIVE_ID: '0ADriveId' })
+    drive.addFile({ name: 'sd-folder', mimeType: FOLDER_MIME, parents: ['0ADriveId'] })
+    expect(await findFolder(env, 'sd-folder', null)).toBeTruthy()
+    expect(await findFolder(env, 'missing', null)).toBeNull()
+    // the real fetch URL carried the team-drive corpus + supportsAllDrives
+    const sd = await import('../src/drive/folder')
+    expect(sd.sharedDriveParams(env).search).toContain('corpora=drive')
+    expect(sd.sharedDriveParams(env).search).toContain('driveId=0ADriveId')
+    expect(sd.sharedDriveParams(env).res).toContain('supportsAllDrives')
+  })
+
   it('resolves keys to parent folder + name, creating folders when asked', async () => {
     const env = makeEnv()
     const root = await getOrCreateFolder(env, 'bucket', null)

@@ -13,12 +13,16 @@ export interface ServiceAccount {
   clientEmail: string
   privateKey: string
   tokenUri: string
+  /** Union upstream flags (default true). `false` → that upstream is excluded from the matching category. */
+  writable?: boolean
+  creatable?: boolean
 }
 
 /**
  * Parses service-account config: either a JSON array, or a file containing
  * concatenated service-account JSON blobs (the rclone `service_account_file`
- * format, one pretty-printed object after another).
+ * format, one pretty-printed object after another). Reads `writable`/`creatable`
+ * fields so union upstream flags can ride in the same payload.
  */
 export function parseServiceAccounts(raw: string): ServiceAccount[] {
   const out: ServiceAccount[] = []
@@ -29,6 +33,8 @@ export function parseServiceAccounts(raw: string): ServiceAccount[] {
         clientEmail: String(obj.client_email),
         privateKey: String(obj.private_key),
         tokenUri: String(obj.token_uri ?? TOKEN_URL),
+        writable: obj.writable === undefined ? true : Boolean(obj.writable),
+        creatable: obj.creatable === undefined ? true : Boolean(obj.creatable),
       })
     }
   }
@@ -159,7 +165,7 @@ export function invalidateTokenCache(): void {
  * Loads the service-account list from the env var, falling back to the AUTH_KV
  * key `service_accounts` (for payloads larger than the 5 KB secret limit).
  */
-async function loadServiceAccounts(env: Env): Promise<ServiceAccount[]> {
+export async function loadServiceAccounts(env: Env): Promise<ServiceAccount[]> {
   const source =
     env.GOOGLE_SERVICE_ACCOUNTS?.trim() || (await env.AUTH_KV.get(SA_KV_KEY)) || ''
   if (!source) return []
@@ -170,13 +176,8 @@ async function loadServiceAccounts(env: Env): Promise<ServiceAccount[]> {
   return list
 }
 
-/** Round-robins service accounts, caching each account's token in KV + memory. */
-async function getServiceAccountToken(env: Env): Promise<string> {
-  const list = await loadServiceAccounts(env)
-  if (list.length === 0) {
-    throw new DriveError(500, 'InternalError', 'No Google credentials configured (set GOOGLE_REFRESH_TOKEN or service accounts)')
-  }
-  const sa = list[rrIndex++ % list.length]
+/** Returns a cached access token for ONE specific service account. */
+async function getSaToken(env: Env, sa: ServiceAccount): Promise<string> {
   const cacheKey = `sa_token:${sa.clientEmail}`
   const memo = memoGetToken(cacheKey)
   if (memo) return memo
@@ -191,12 +192,30 @@ async function getServiceAccountToken(env: Env): Promise<string> {
   return token
 }
 
+/** Drops one service account's memoized + KV token (targeted 401 recovery). */
+export async function invalidateSaToken(env: Env, sa: ServiceAccount): Promise<void> {
+  const cacheKey = `sa_token:${sa.clientEmail}`
+  memTokens.delete(cacheKey)
+  await env.AUTH_KV.delete(cacheKey).catch(() => {})
+}
+
+/** Round-robins service accounts, caching each account's token in KV + memory. */
+async function getServiceAccountToken(env: Env): Promise<string> {
+  const list = await loadServiceAccounts(env)
+  if (list.length === 0) {
+    throw new DriveError(500, 'InternalError', 'No Google credentials configured (set GOOGLE_REFRESH_TOKEN or service accounts)')
+  }
+  const sa = list[rrIndex++ % list.length]
+  return getSaToken(env, sa)
+}
+
 /**
  * Returns a cached OAuth access token from KV, refreshing when absent/expired.
  * Uses service-account auth when GOOGLE_REFRESH_TOKEN is unset, else the OAuth
  * refresh-token flow (KV expirationTtl = expires_in - 60s).
  */
-export async function getAccessToken(env: Env): Promise<string> {
+export async function getAccessToken(env: Env, sa?: ServiceAccount): Promise<string> {
+  if (sa) return getSaToken(env, sa)
   if (!env.GOOGLE_REFRESH_TOKEN) return getServiceAccountToken(env)
   const memo = memoGetToken(TOKEN_KEY)
   if (memo) return memo
@@ -213,19 +232,31 @@ export async function getAccessToken(env: Env): Promise<string> {
 
 /**
  * Drive API fetch wrapper: attaches the Bearer token, and on a 401 invalidates
- * the cached token and retries once with a freshly refreshed one.
+ * the cached token and retries once with a freshly refreshed one. Pass `sa` to
+ * pin the request to a specific service account (union mode); when pinned, only
+ * that account's token is invalidated on 401.
  */
-export async function driveFetch(env: Env, url: string, init: RequestInit = {}, retried = false): Promise<Response> {
-  const token = await getAccessToken(env)
+export async function driveFetch(
+  env: Env,
+  url: string,
+  init: RequestInit = {},
+  opts: { sa?: ServiceAccount } = {},
+  retried = false,
+): Promise<Response> {
+  const token = await getAccessToken(env, opts.sa)
   const headers = new Headers(init.headers)
   if (!headers.has('Authorization')) headers.set('Authorization', `Bearer ${token}`)
   const res = await fetch(url, { ...init, headers })
   if (res.status === 401 && !retried) {
+    if (opts.sa) {
+      await invalidateSaToken(env, opts.sa)
+      return driveFetch(env, url, init, opts, true)
+    }
     invalidateTokenCache()
     await env.AUTH_KV.delete(TOKEN_KEY)
     const listed = await env.AUTH_KV.list({ prefix: 'sa_token:' })
     for (const k of listed.keys) await env.AUTH_KV.delete(k.name)
-    return driveFetch(env, url, init, true)
+    return driveFetch(env, url, init, opts, true)
   }
   return res
 }

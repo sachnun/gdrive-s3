@@ -149,6 +149,8 @@ export interface StubOptions {
   validTokens?: string[]
   /** Token returned by the oauth refresh endpoint (defaults to 'fake-token'). */
   refreshToken?: string
+  /** storageQuota returned by `/drive/v3/about` (defaults to 10 GiB limit, 0 usage). */
+  quota?: { limit?: string; usage?: string }
 }
 
 export interface FetchStub {
@@ -163,6 +165,7 @@ export function makeFetchStub(drive: FakeDrive, opts: StubOptions = {}): FetchSt
     validTokens: opts.validTokens ?? ['fake-token'],
     refreshToken: opts.refreshToken ?? 'fake-token',
     oauthLog: [] as string[],
+    quota: opts.quota ?? { limit: '10737418240', usage: '0' },
   }
   const stub = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = new URL(String(input))
@@ -261,6 +264,16 @@ export function makeFetchStub(drive: FakeDrive, opts: StubOptions = {}): FetchSt
       })
       drive.sessions.delete(uploadId!)
       return new Response(JSON.stringify(toFile(f)), { status: 201, headers: { 'Content-Type': 'application/json' } })
+    }
+
+    if (path === '/drive/v3/about' && method === 'GET') {
+      return new Response(
+        JSON.stringify({
+          user: { displayName: 'fake', emailAddress: 'fake@example.com' },
+          storageQuota: { limit: state.quota.limit ?? '0', usage: state.quota.usage ?? '0' },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )
     }
 
     if (path === '/drive/v3/files' && method === 'GET') {

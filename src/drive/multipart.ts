@@ -1,9 +1,11 @@
 import type { Env } from '../env'
 import { randomHex, sha256Hex } from '../util'
-import { DRIVE_API, driveFetch } from './auth'
+import { DRIVE_API, driveFetch, type ServiceAccount } from './auth'
 import { DriveError } from './errors'
-import { FOLDER_MIME, findCachedFolder, getOrCreateFolder } from './folder'
+import { FOLDER_MIME, findCachedFolder, getOrCreateFolder, sharedDriveParams } from './folder'
 import { createResumableSession, findFilesInFolder, trashFile, uploadFile, uploadToSession, type FileMeta } from './files'
+import { loadUnion, type Union } from './union/config'
+import { saResolveKeyCreate } from './union/resolve'
 
 export const MULTIPART_ROOT = '.gdrive-s3-multipart'
 const GC_AGE_MS = 24 * 3600 * 1000
@@ -17,6 +19,10 @@ export interface MultipartState {
   contentType: string
   createdAt: number
   parts: Record<string, { fileId: string; size: number; etag: string }>
+  /** Union mode: upstream index holding the temp part folder. */
+  saIndex?: number
+  /** Union mode: upstream indices receiving the final concatenated object. */
+  createTargets?: number[]
 }
 
 function stateKey(uploadId: string): string {
@@ -29,18 +35,36 @@ async function getState(env: Env, uploadId: string): Promise<MultipartState> {
   return JSON.parse(raw) as MultipartState
 }
 
+async function sessionSa(env: Env, state: MultipartState): Promise<ServiceAccount | undefined> {
+  if (state.saIndex === undefined) return undefined
+  const union = await loadUnion(env)
+  return union.upstreams[state.saIndex]?.sa
+}
+
 /**
- * Creates a multipart upload session: a temp folder `.gdrive-s3-multipart/<bucket>/<uploadId>`
- * at the Drive root (outside any bucket, so it never shows up in listings).
+ * Creates a multipart upload session: a temp folder
+ * `.gdrive-s3-multipart/<bucket>/<uploadId>` at the Drive root of the primary
+ * upstream (union mode) or the default identity. In union mode, `createTargets`
+ * are the upstream indices the final object will be concatenated into.
  */
 export async function createMultipart(
   env: Env,
-  args: { bucket: string; key: string; parentId: string; name: string; contentType: string },
+  args: {
+    bucket: string
+    key: string
+    parentId: string
+    name: string
+    contentType: string
+    sa?: ServiceAccount
+    union?: Union
+    createTargets?: number[]
+  },
 ): Promise<{ uploadId: string }> {
   const uploadId = randomHex(24)
-  const mpRoot = await getOrCreateFolder(env, MULTIPART_ROOT, null)
-  const bucketDir = await getOrCreateFolder(env, args.bucket, mpRoot)
-  const folderId = await getOrCreateFolder(env, uploadId, bucketDir)
+  const sa = args.sa
+  const mpRoot = await getOrCreateFolder(env, MULTIPART_ROOT, null, sa)
+  const bucketDir = await getOrCreateFolder(env, args.bucket, mpRoot, sa)
+  const folderId = await getOrCreateFolder(env, uploadId, bucketDir, sa)
   const state: MultipartState = {
     bucket: args.bucket,
     key: args.key,
@@ -50,6 +74,10 @@ export async function createMultipart(
     contentType: args.contentType,
     createdAt: Date.now(),
     parts: {},
+  }
+  if (args.union && args.createTargets && args.createTargets.length > 0) {
+    state.saIndex = Math.min(...args.createTargets)
+    state.createTargets = args.createTargets
   }
   await env.FOLDER_CACHE.put(stateKey(uploadId), JSON.stringify(state))
   return { uploadId }
@@ -65,10 +93,11 @@ export async function uploadPart(
   data?: Uint8Array,
 ): Promise<{ etag: string }> {
   const state = await getState(env, uploadId)
+  const sa = await sessionSa(env, state)
   const n = String(partNumber)
   const existing = state.parts[n]
   if (existing) {
-    await trashFile(env, existing.fileId)
+    await trashFile(env, existing.fileId, sa)
     delete state.parts[n]
   }
   const name = `part-${n.padStart(5, '0')}`
@@ -80,6 +109,7 @@ export async function uploadPart(
     size,
     appProperties: { partNumber: n, uploadId },
     data,
+    sa,
   })
   const etag = await sha256Hex(meta.id)
   state.parts[n] = { fileId: meta.id, size: meta.size ? Number(meta.size) : (size ?? 0), etag }
@@ -88,13 +118,13 @@ export async function uploadPart(
 }
 
 /** Re-syncs the part list from the temp folder so KV loss/races cannot lose parts. */
-async function reconcileParts(env: Env, state: MultipartState): Promise<void> {
+async function reconcileParts(env: Env, state: MultipartState, sa?: ServiceAccount): Promise<void> {
   let pageToken: string | undefined
   for (let page = 0; page < 10; page++) {
     const q = `'${state.folderId}' in parents and trashed=false and mimeType!='${FOLDER_MIME}'`
-    let url = `${DRIVE_API}/drive/v3/files?q=${encodeURIComponent(q)}&pageSize=1000&fields=nextPageToken,files(id,size,appProperties)&spaces=drive`
+    let url = `${DRIVE_API}/drive/v3/files?q=${encodeURIComponent(q)}&pageSize=1000&fields=nextPageToken,files(id,size,appProperties)&spaces=drive${sharedDriveParams(env).search}`
     if (pageToken) url += `&pageToken=${pageToken}`
-    const res = await driveFetch(env, url)
+    const res = await driveFetch(env, url, {}, { sa })
     if (!res.ok) throw new DriveError(500, 'InternalError', `multipart reconcile failed (HTTP ${res.status})`)
     const data = (await res.json()) as {
       nextPageToken?: string
@@ -109,50 +139,57 @@ async function reconcileParts(env: Env, state: MultipartState): Promise<void> {
   }
 }
 
-/**
- * Concatenates part files (streamed sequentially into one resumable session at the
- * final key), applies overwrite semantics, then trashes the temp folder.
- */
-export async function completeMultipart(
+interface PartRef {
+  partNumber: number
+  fileId: string
+  size: number
+}
+
+async function orderParts(
   env: Env,
-  uploadId: string,
+  state: MultipartState,
   requested: { partNumber: number; etag: string }[],
-): Promise<{ etag: string }> {
-  const state = await getState(env, uploadId)
+): Promise<PartRef[]> {
   // Re-sync from Drive only when the KV state cannot answer by itself: when the
   // client listed parts that are unknown to us, or sent no part list at all.
+  const sa = await sessionSa(env, state)
   const needsReconcile =
     requested.length === 0 || !requested.every((r) => state.parts[String(r.partNumber)])
-  if (needsReconcile) await reconcileParts(env, state)
+  if (needsReconcile) await reconcileParts(env, state, sa)
 
-  let ordered: { partNumber: number; fileId: string; size: number }[]
   if (requested.length === 0) {
-    ordered = Object.entries(state.parts)
+    return Object.entries(state.parts)
       .sort((a, b) => Number(a[0]) - Number(b[0]))
       .map(([, p]) => ({ partNumber: 0, fileId: p.fileId, size: p.size }))
-  } else {
-    ordered = requested.map((r) => {
-      const p = state.parts[String(r.partNumber)]
-      if (!p) throw new DriveError(400, 'InvalidPart', `Part ${r.partNumber} was not uploaded.`)
-      if (p.etag !== r.etag) throw new DriveError(400, 'InvalidPart', `ETag mismatch for part ${r.partNumber}.`)
-      return { partNumber: r.partNumber, fileId: p.fileId, size: p.size }
-    })
   }
+  return requested.map((r) => {
+    const p = state.parts[String(r.partNumber)]
+    if (!p) throw new DriveError(400, 'InvalidPart', `Part ${r.partNumber} was not uploaded.`)
+    if (p.etag !== r.etag) throw new DriveError(400, 'InvalidPart', `ETag mismatch for part ${r.partNumber}.`)
+    return { partNumber: r.partNumber, fileId: p.fileId, size: p.size }
+  })
+}
 
+/** Streams the ordered parts into one destination parent (existing-folder walk). */
+async function concatInto(
+  env: Env,
+  state: MultipartState,
+  ordered: PartRef[],
+  parentId: string,
+  sessionSa: ServiceAccount | undefined,
+  partSa?: ServiceAccount,
+): Promise<FileMeta> {
   const totalSize = ordered.reduce((s, p) => s + p.size, 0)
-  const location = await createResumableSession(
-    env,
-    { name: state.name, parents: [state.parentId], mimeType: state.contentType },
-    totalSize,
-  )
-
+  const location = await createResumableSession(env, { name: state.name, parents: [parentId], mimeType: state.contentType }, totalSize, sessionSa)
   let finalMeta: FileMeta | undefined
   if (ordered.length === 0) {
-    finalMeta = await uploadToSession(env, location, null, 0, state.contentType)
+    finalMeta = await uploadToSession(env, location, null, 0, state.contentType, sessionSa)
   } else {
     let offset = 0
     for (const p of ordered) {
-      const partRes = await driveFetch(env, `${DRIVE_API}/drive/v3/files/${p.fileId}?alt=media&supportsAllDrives=true`)
+      // Part files live in the PRIMARY upstream's temp folder; the final object
+      // session belongs to the target upstream — read and write use different SAs.
+      const partRes = await driveFetch(env, `${DRIVE_API}/drive/v3/files/${p.fileId}?alt=media&supportsAllDrives=true`, {}, { sa: partSa ?? sessionSa })
       if (!partRes.ok) {
         throw new DriveError(500, 'InternalError', `read part ${p.partNumber} failed (HTTP ${partRes.status})`)
       }
@@ -168,7 +205,7 @@ export async function completeMultipart(
         },
         body: partRes.body,
         duplex: 'half',
-      } as RequestInit)
+      } as RequestInit, { sa: sessionSa })
       offset += p.size
       if (up.status === 200 || up.status === 201) {
         finalMeta = (await up.json()) as FileMeta
@@ -178,21 +215,59 @@ export async function completeMultipart(
     }
   }
   if (!finalMeta) throw new DriveError(500, 'InternalError', 'multipart concat did not produce a file')
+  return finalMeta
+}
 
-  // Overwrite semantics: trash older files with the same name in the target folder.
-  const siblings = await findFilesInFolder(env, state.name, state.parentId)
-  for (const s of siblings) {
-    if (s.id !== finalMeta.id) await trashFile(env, s.id)
+/**
+ * Concatenates part files (streamed sequentially into one resumable session at
+ * the final key), applies overwrite semantics, then trashes the temp folder.
+ * In union mode the final object is written to every CREATE target upstream.
+ */
+export async function completeMultipart(
+  env: Env,
+  uploadId: string,
+  requested: { partNumber: number; etag: string }[],
+): Promise<{ etag: string }> {
+  const state = await getState(env, uploadId)
+  const ordered = await orderParts(env, state, requested)
+  const sa = await sessionSa(env, state)
+
+  let finalMeta: FileMeta
+  if (state.createTargets?.length) {
+    const union = await loadUnion(env)
+    const primarySa = sa
+    let last: FileMeta | null = null
+    for (const t of state.createTargets) {
+      const up = union.upstreams[t]
+      if (!up) continue
+      const { parentId } = await saResolveKeyCreate(env, up, state.bucket, state.key)
+      last = await concatInto(env, state, ordered, parentId, up.sa, primarySa)
+      await cleanupSiblings(env, state.name, parentId, last.id, up.sa)
+    }
+    if (!last) throw new DriveError(500, 'InternalError', 'multipart concat did not produce a file')
+    finalMeta = last
+  } else {
+    finalMeta = await concatInto(env, state, ordered, state.parentId, sa)
+    await cleanupSiblings(env, state.name, state.parentId, finalMeta.id, sa)
   }
 
-  await trashFile(env, state.folderId)
+  await trashFile(env, state.folderId, sa)
   await env.FOLDER_CACHE.delete(stateKey(uploadId)).catch(() => {})
   return { etag: finalMeta.id }
 }
 
+/** Overwrite semantics: trash older files with the same name in the target folder. */
+async function cleanupSiblings(env: Env, name: string, parentId: string, keepId: string, sa?: ServiceAccount): Promise<void> {
+  const siblings = await findFilesInFolder(env, name, parentId, sa)
+  for (const s of siblings) {
+    if (s.id !== keepId) await trashFile(env, s.id, sa)
+  }
+}
+
 export async function abortMultipart(env: Env, uploadId: string): Promise<void> {
   const state = await getState(env, uploadId)
-  await trashFile(env, state.folderId)
+  const sa = await sessionSa(env, state)
+  await trashFile(env, state.folderId, sa)
   await env.FOLDER_CACHE.delete(stateKey(uploadId)).catch(() => {})
 }
 
@@ -210,7 +285,7 @@ export async function gcMultipart(env: Env, bucket: string): Promise<void> {
     let pageToken: string | undefined
     for (let page = 0; page < 5; page++) {
       const q = `'${bucketDir}' in parents and trashed=false and mimeType='${FOLDER_MIME}'`
-      let url = `${DRIVE_API}/drive/v3/files?q=${encodeURIComponent(q)}&pageSize=1000&fields=nextPageToken,files(id,name,modifiedTime)&spaces=drive`
+      let url = `${DRIVE_API}/drive/v3/files?q=${encodeURIComponent(q)}&pageSize=1000&fields=nextPageToken,files(id,name,modifiedTime)&spaces=drive${sharedDriveParams(env).search}`
       if (pageToken) url += `&pageToken=${pageToken}`
       const res = await driveFetch(env, url)
       if (!res.ok) return

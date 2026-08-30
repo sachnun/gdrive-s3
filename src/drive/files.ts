@@ -1,7 +1,7 @@
 import type { Env } from '../env'
-import { DRIVE_API, UPLOAD_API, driveFetch } from './auth'
+import { DRIVE_API, UPLOAD_API, driveFetch, type ServiceAccount } from './auth'
 import { DriveError } from './errors'
-import { FOLDER_MIME, escQuery } from './folder'
+import { FOLDER_MIME, escQuery, sharedDriveParams, usingSharedDrive } from './folder'
 import { randomHex } from '../util'
 
 export interface FileMeta {
@@ -17,8 +17,8 @@ export interface FileMeta {
 
 export const FILE_FIELDS = 'id,name,size,mimeType,modifiedTime,createdTime,trashed,appProperties'
 
-export async function getFileMeta(env: Env, id: string): Promise<FileMeta> {
-  const res = await driveFetch(env, `${DRIVE_API}/drive/v3/files/${id}?fields=${FILE_FIELDS}&supportsAllDrives=true`)
+export async function getFileMeta(env: Env, id: string, sa?: ServiceAccount): Promise<FileMeta> {
+  const res = await driveFetch(env, `${DRIVE_API}/drive/v3/files/${id}?fields=${FILE_FIELDS}${sharedDriveParams(env).res}`, {}, { sa })
   if (res.status === 404) throw new DriveError(404, 'NoSuchKey', 'The specified key does not exist.')
   if (!res.ok) throw new DriveError(500, 'InternalError', `file metadata failed (HTTP ${res.status})`)
   return (await res.json()) as FileMeta
@@ -29,17 +29,20 @@ export async function createResumableSession(
   env: Env,
   metadata: { name: string; parents: string[]; mimeType?: string; appProperties?: Record<string, string> },
   size?: number,
+  sa?: ServiceAccount,
 ): Promise<string> {
   const url = new URL(`${UPLOAD_API}/files`)
   url.searchParams.set('uploadType', 'resumable')
   url.searchParams.set('fields', FILE_FIELDS)
+  if (usingSharedDrive(env)) url.searchParams.set('supportsAllDrives', 'true')
+  url.searchParams.set('includeItemsFromAllDrives', 'true')
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (size !== undefined) headers['X-Upload-Content-Length'] = String(size)
   const res = await driveFetch(env, url.toString(), {
     method: 'POST',
     headers,
     body: JSON.stringify(metadata),
-  })
+  }, { sa })
   const location = res.headers.get('Location')
   if (!res.ok || !location) {
     throw new DriveError(500, 'InternalError', `resumable session init failed (HTTP ${res.status})`)
@@ -54,6 +57,7 @@ export async function uploadToSession(
   body: BodyInit | null,
   size?: number,
   contentType?: string,
+  sa?: ServiceAccount,
 ): Promise<FileMeta> {
   const headers: Record<string, string> = {}
   if (size !== undefined) headers['Content-Length'] = String(size)
@@ -63,7 +67,7 @@ export async function uploadToSession(
     headers,
     body,
     duplex: 'half',
-  } as RequestInit)
+  } as RequestInit, { sa })
   if (res.status === 200 || res.status === 201) return (await res.json()) as FileMeta
   throw new DriveError(500, 'InternalError', `resumable upload failed (HTTP ${res.status})`)
 }
@@ -85,16 +89,18 @@ export async function uploadFile(
     size?: number
     appProperties?: Record<string, string>
     data?: Uint8Array
+    sa?: ServiceAccount
   },
 ): Promise<FileMeta> {
-  const { parentId, name, body, contentType, size, appProperties, data } = args
-  if (data) return uploadSingleShot(env, args, data)
+  const { parentId, name, body, contentType, size, appProperties, data, sa } = args
+  if (data) return uploadSingleShot(env, args, data, sa)
   const location = await createResumableSession(
     env,
     { name, parents: [parentId], mimeType: contentType, appProperties },
     size,
+    sa,
   )
-  return uploadToSession(env, location, body, size, contentType)
+  return uploadToSession(env, location, body, size, contentType, sa)
 }
 
 /** One-request upload (metadata + content as multipart/related); ≤5 MiB only. */
@@ -102,6 +108,7 @@ async function uploadSingleShot(
   env: Env,
   args: { parentId: string; name: string; contentType?: string; appProperties?: Record<string, string> },
   content: Uint8Array,
+  sa?: ServiceAccount,
 ): Promise<FileMeta> {
   const boundary = 'gds3' + randomHex(16)
   const metadata: Record<string, unknown> = { name: args.name, parents: [args.parentId] }
@@ -118,55 +125,56 @@ async function uploadSingleShot(
   body.set(tail, head.length + content.length)
   const res = await driveFetch(
     env,
-    `${UPLOAD_API}/files?uploadType=multipart&fields=${encodeURIComponent(FILE_FIELDS)}`,
+    `${UPLOAD_API}/files?uploadType=multipart&fields=${encodeURIComponent(FILE_FIELDS)}${usingSharedDrive(env) ? '&supportsAllDrives=true' : ''}`,
     {
       method: 'POST',
       headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
       body,
     },
+    { sa },
   )
   if (!res.ok) throw new DriveError(500, 'InternalError', `upload failed (HTTP ${res.status})`)
   return (await res.json()) as FileMeta
 }
 
 /** Streams file content; optionally forwards a Range header (Drive supports it). */
-export async function downloadFile(env: Env, id: string, range?: string | null): Promise<Response> {
+export async function downloadFile(env: Env, id: string, range?: string | null, sa?: ServiceAccount): Promise<Response> {
   const headers: Record<string, string> = {}
   if (range) headers['Range'] = range
-  return driveFetch(env, `${DRIVE_API}/drive/v3/files/${id}?alt=media&supportsAllDrives=true`, { headers })
+  return driveFetch(env, `${DRIVE_API}/drive/v3/files/${id}?alt=media${sharedDriveParams(env).res}`, { headers }, { sa })
 }
 
 /**
  * Finds files by exact name in a folder (newest created first, folders excluded).
  * Drive allows duplicate names, so callers pick the first (newest) result.
  */
-export async function findFilesInFolder(env: Env, name: string, parentId: string): Promise<FileMeta[]> {
+export async function findFilesInFolder(env: Env, name: string, parentId: string, sa?: ServiceAccount): Promise<FileMeta[]> {
   const q = `name='${escQuery(name)}' and '${parentId}' in parents and trashed=false and mimeType!='${FOLDER_MIME}'`
-  const url = `${DRIVE_API}/drive/v3/files?q=${encodeURIComponent(q)}&pageSize=1000&fields=files(${FILE_FIELDS})&orderBy=createdTime desc&spaces=drive`
-  const res = await driveFetch(env, url)
+  const url = `${DRIVE_API}/drive/v3/files?q=${encodeURIComponent(q)}&pageSize=1000&fields=files(${FILE_FIELDS})&orderBy=createdTime desc&spaces=drive${sharedDriveParams(env).search}`
+  const res = await driveFetch(env, url, {}, { sa })
   if (!res.ok) throw new DriveError(500, 'InternalError', `file search failed (HTTP ${res.status})`)
   const data = (await res.json()) as { files: FileMeta[] }
   return data.files ?? []
 }
 
 /** Moves a file/folder to the Drive trash (safe delete; no permanent removal). */
-export async function trashFile(env: Env, id: string): Promise<void> {
-  const res = await driveFetch(env, `${DRIVE_API}/drive/v3/files/${id}`, {
+export async function trashFile(env: Env, id: string, sa?: ServiceAccount): Promise<void> {
+  const res = await driveFetch(env, `${DRIVE_API}/drive/v3/files/${id}${sharedDriveParams(env).res}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ trashed: true }),
-  })
+  }, { sa })
   if (!res.ok && res.status !== 404) {
     throw new DriveError(500, 'InternalError', `trash failed (HTTP ${res.status})`)
   }
 }
 
-export async function copyFile(env: Env, srcId: string, name: string, parentId: string): Promise<FileMeta> {
-  const res = await driveFetch(env, `${DRIVE_API}/drive/v3/files/${srcId}/copy`, {
+export async function copyFile(env: Env, srcId: string, name: string, parentId: string, sa?: ServiceAccount): Promise<FileMeta> {
+  const res = await driveFetch(env, `${DRIVE_API}/drive/v3/files/${srcId}/copy${sharedDriveParams(env).res}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, parents: [parentId] }),
-  })
+  }, { sa })
   if (!res.ok) throw new DriveError(500, 'InternalError', `copy failed (HTTP ${res.status})`)
   return (await res.json()) as FileMeta
 }

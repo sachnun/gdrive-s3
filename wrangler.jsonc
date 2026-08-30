@@ -17,7 +17,8 @@
   "vars": {
     "REGION": "us-east-1",
     "ALLOWED_BUCKETS": "*",
-    "PUBLIC_READ_BUCKETS": ""
+    "PUBLIC_READ_BUCKETS": "",
+    "UNION_MODE": "round-robin"
   },
   "observability": {
     "enabled": true,
