@@ -150,32 +150,9 @@ export async function completeMultipart(
   if (ordered.length === 0) {
     finalMeta = await uploadToSession(env, location, null, 0, state.contentType)
   } else {
-    let offset = 0
-    for (const p of ordered) {
-      const partRes = await driveFetch(env, `${DRIVE_API}/drive/v3/files/${p.fileId}?alt=media&supportsAllDrives=true`)
-      if (!partRes.ok) {
-        throw new DriveError(500, 'InternalError', `read part ${p.partNumber} failed (HTTP ${partRes.status})`)
-      }
-      // Drive resumable sessions can be fed in multiple sequential PUTs, but each
-      // must declare its byte range via Content-Range (otherwise Drive restarts at 0).
-      const end = offset + p.size - 1
-      const up = await driveFetch(env, location, {
-        method: 'PUT',
-        headers: {
-          'Content-Length': String(p.size),
-          'Content-Type': 'application/octet-stream',
-          'Content-Range': `bytes ${offset}-${end}/${totalSize}`,
-        },
-        body: partRes.body,
-        duplex: 'half',
-      } as RequestInit)
-      offset += p.size
-      if (up.status === 200 || up.status === 201) {
-        finalMeta = (await up.json()) as FileMeta
-      } else if (up.status !== 308) {
-        throw new DriveError(500, 'InternalError', `concat part ${p.partNumber} failed (HTTP ${up.status})`)
-      }
-    }
+    // One PUT for the whole object: Drive rejects intermediate chunks smaller
+    // than 256 KiB, so per-part chunked PUTs break for any normal part size.
+    finalMeta = await uploadToSession(env, location, concatParts(env, ordered), totalSize, state.contentType)
   }
   if (!finalMeta) throw new DriveError(500, 'InternalError', 'multipart concat did not produce a file')
 
@@ -188,6 +165,45 @@ export async function completeMultipart(
   await trashFile(env, state.folderId)
   await env.FOLDER_CACHE.delete(stateKey(uploadId)).catch(() => {})
   return { etag: finalMeta.id }
+}
+
+/**
+ * Lazily streams the parts back-to-back so a multipart object is uploaded in a
+ * single resumable PUT. Parts are fetched one at a time, so memory stays flat
+ * regardless of the total object size.
+ */
+function concatParts(env: Env, parts: { partNumber: number; fileId: string; size: number }[]): ReadableStream<Uint8Array> {
+  let index = 0
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      for (;;) {
+        if (!reader) {
+          if (index >= parts.length) {
+            controller.close()
+            return
+          }
+          const p = parts[index++]
+          const res = await driveFetch(env, `${DRIVE_API}/drive/v3/files/${p.fileId}?alt=media&supportsAllDrives=true`)
+          if (!res.ok || !res.body) {
+            controller.error(new DriveError(500, 'InternalError', `read part ${p.partNumber} failed (HTTP ${res.status})`))
+            return
+          }
+          reader = res.body.getReader()
+        }
+        const { done, value } = await reader.read()
+        if (done) {
+          reader = null
+          continue
+        }
+        controller.enqueue(value)
+        return
+      }
+    },
+    cancel(reason) {
+      void reader?.cancel(reason)
+    },
+  })
 }
 
 export async function abortMultipart(env: Env, uploadId: string): Promise<void> {
