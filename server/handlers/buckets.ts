@@ -1,0 +1,134 @@
+import type { Env } from '../env'
+import { DRIVE_API, driveFetch } from '../drive/auth'
+import { DriveError } from '../drive/errors'
+import { FOLDER_MIME, findCachedFolder, findFolder, folderCacheKey, getOrCreateFolder, resolveExistingPath } from '../drive/folder'
+import { findFilesInFolder, getFileMeta, trashFile } from '../drive/files'
+import { MULTIPART_ROOT } from '../drive/multipart'
+import { extractXmlKeys } from '../s3/request'
+import { listObjects, type ListOptions } from '../s3/list'
+import * as xml from '../s3/xml'
+import { mapLimit, requestId } from '../util'
+
+/** Max parallel per-key deletions in DeleteObjects (Drive rate limit friendly). */
+const DELETE_OBJECTS_CONCURRENCY = 8
+
+export async function handleListBuckets(env: Env): Promise<Response> {
+  const allowed = (env.ALLOWED_BUCKETS ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+  const wildcard = allowed.includes('*')
+  const buckets: { name: string; creationDate: string }[] = []
+  const found = new Set<string>()
+  let pageToken: string | undefined
+  for (let page = 0; page < 10; page++) {
+    const q = `mimeType='${FOLDER_MIME}' and 'root' in parents and trashed=false`
+    let url = `${DRIVE_API}/drive/v3/files?q=${encodeURIComponent(q)}&pageSize=1000&fields=nextPageToken,files(id,name,createdTime)&spaces=drive&orderBy=name`
+    if (pageToken) url += `&pageToken=${pageToken}`
+    const res = await driveFetch(env, url)
+    if (!res.ok) throw new DriveError(500, 'InternalError', `bucket list failed (HTTP ${res.status})`)
+    const data = (await res.json()) as { nextPageToken?: string; files: { id: string; name: string; createdTime: string }[] }
+    for (const f of data.files) {
+      // Internal multipart temp storage is never exposed as a bucket.
+      if (f.name === MULTIPART_ROOT) continue
+      if ((wildcard || allowed.includes(f.name)) && !found.has(f.name)) {
+        buckets.push({ name: f.name, creationDate: f.createdTime })
+        found.add(f.name)
+      }
+    }
+    pageToken = data.nextPageToken
+    if (!pageToken) break
+  }
+  // Fallback for allowed buckets not seen in the root listing (e.g. >1000 root folders).
+  for (const name of allowed) {
+    if (found.has(name)) continue
+    const id = await findFolder(env, name, null)
+    if (id) {
+      try {
+        const meta = await getFileMeta(env, id)
+        buckets.push({ name, creationDate: meta.createdTime ?? '' })
+      } catch {
+        buckets.push({ name, creationDate: '' })
+      }
+    }
+  }
+  buckets.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+  return xml.listBucketsXml(buckets)
+}
+
+export async function handleHeadBucket(env: Env, bucket: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  return new Response(null, { status: 200, headers: { 'x-amz-request-id': requestId() } })
+}
+
+export async function handleCreateBucket(env: Env, bucket: string): Promise<Response> {
+  // AWS S3 naming rules: 3-63 chars, lowercase letters/digits/dots/hyphens,
+  // must begin and end with a letter or digit.
+  // https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html
+  if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket) || bucket.includes('..')) {
+    return xml.s3Error(400, 'InvalidBucketName', 'The specified bucket is not valid.', `/${bucket}`, requestId())
+  }
+  // us-east-1 legacy semantics: re-creating an owned bucket returns 200 OK.
+  await getOrCreateFolder(env, bucket, null)
+  return new Response(null, { status: 200, headers: { 'x-amz-request-id': requestId() } })
+}
+
+export async function handleGetBucketLocation(env: Env, bucket: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  return xml.locationXml(env.REGION || 'us-east-1')
+}
+
+export async function handleListObjects(
+  env: Env,
+  bucket: string,
+  params: URLSearchParams,
+  isV2: boolean,
+): Promise<Response> {
+  const bucketFolderId = await findCachedFolder(env, bucket, null)
+  const maxKeysRaw = parseInt(params.get('max-keys') ?? '1000', 10)
+  const maxKeys = isNaN(maxKeysRaw) ? 1000 : Math.min(Math.max(maxKeysRaw, 0), 1000)
+  const opts: ListOptions = {
+    bucket,
+    prefix: (params.get('prefix') ?? '').replace(/^\/+/, ''),
+    delimiter: params.get('delimiter') ?? '',
+    maxKeys,
+    marker: params.get('marker') ?? undefined,
+    continuationToken: params.get('continuation-token') ?? undefined,
+    startAfter: params.get('start-after') ?? undefined,
+    isV2,
+    encodingType: params.get('encoding-type') ?? undefined,
+  }
+  const result = await listObjects(env, bucketFolderId, opts)
+  return xml.listObjectsXml(opts, result, requestId())
+}
+
+export async function handleDeleteBucket(env: Env, bucket: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  await trashFile(env, id)
+  await env.FOLDER_CACHE.delete(folderCacheKey(null, bucket)).catch(() => {})
+  return new Response(null, { status: 204, headers: { 'x-amz-request-id': requestId() } })
+}
+
+export async function handleDeleteObjects(env: Env, req: Request, bucket: string): Promise<Response> {
+  const body = await req.text()
+  const keys = extractXmlKeys(body)
+  let bucketFolderId: string | null = null
+  if (keys.length > 0) bucketFolderId = await findCachedFolder(env, bucket, null).catch(() => null)
+  const results = await mapLimit(keys, DELETE_OBJECTS_CONCURRENCY, async (k): Promise<boolean> => {
+    try {
+      const target = bucketFolderId ? await resolveExistingPath(env, bucketFolderId, k) : null
+      const file = target ? (await findFilesInFolder(env, target.name, target.parentId))[0] : undefined
+      if (file) await trashFile(env, file.id)
+      return true
+    } catch {
+      return false
+    }
+  })
+  const deleted: string[] = []
+  const errors: { key: string; code: string; message: string }[] = []
+  results.forEach((ok, i) => {
+    if (ok) deleted.push(keys[i])
+    else errors.push({ key: keys[i], code: 'InternalError', message: 'failed to delete object' })
+  })
+  return xml.deleteResultXml(deleted, errors)
+}

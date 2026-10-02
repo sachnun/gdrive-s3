@@ -1,6 +1,6 @@
 import { AwsClient } from 'aws4fetch'
 import type { Env } from '../server/env'
-import { FakeDrive, makeEnv, makeFetchStub, type FetchStub } from './harness'
+import { FakeDrive, makeEnv, makeFetchStub, type FetchStub } from './fakes'
 
 export const ACCESS_KEY = 'test-access'
 export const SECRET_KEY = 'test-secret-1234567890'

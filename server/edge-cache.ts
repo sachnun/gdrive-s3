@@ -1,5 +1,5 @@
 import type { Env } from './env'
-import { isPublicReadBucket } from './middleware'
+import { isPublicReadBucket } from './s3/access'
 
 /**
  * Edge caching of public-read object GETs via the Workers Cache API (free,

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { verifySignature } from '../server/s3/signature'
-import { makeEnv } from './harness'
+import { makeEnv } from './fakes'
 import { makeAws } from './helpers'
 
 describe('AWS SigV4 verification', () => {

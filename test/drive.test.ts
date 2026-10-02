@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { DRIVE_API, driveFetch, getAccessToken, invalidateTokenCache, parseServiceAccounts } from '../server/drive/auth'
 import { FOLDER_MIME, findFolder, getOrCreateFolder, resolveExistingPath, resolvePathCreate } from '../server/drive/folder'
 import { downloadFile, findFilesInFolder, trashFile, uploadFile } from '../server/drive/files'
-import { FakeDrive, makeEnv, makeFetchStub } from './harness'
+import { FakeDrive, makeEnv, makeFetchStub } from './fakes'
 
 describe('drive auth (KV-backed token)', () => {
   let drive: FakeDrive
