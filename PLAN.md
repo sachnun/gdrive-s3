@@ -14,7 +14,7 @@ client compatibility, security) so it can be executed directly.
 S3 Client (rclone, aws cli, s3cmd, SDKs)
         │  S3 request (SigV4), path-style: /<bucket>/<key>
         ▼
-Cloudflare Worker (Hono)
+Cloudflare Worker (h3 + Nitro)
         ├─ 1. Bucket validation (ALLOWED_BUCKETS)
         ├─ 2. AWS SigV4 verification (Web Crypto) + presigned expiry + date freshness
         ├─ 3. Translate S3 ops → Google Drive API:
@@ -149,7 +149,7 @@ Secrets (wrangler secret / dashboard): `ACCESS_KEY`, `SECRET_KEY`, `REGION`,
 `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`, `ALLOWED_BUCKETS`,
 `PUBLIC_READ_BUCKETS` (optional).
 
-KV bindings in `wrangler.jsonc`: `AUTH_KV`, `FOLDER_CACHE`.
+KV bindings in `nitro.config.ts`: `AUTH_KV`, `FOLDER_CACHE`.
 
 rclone test config:
 ```
@@ -172,7 +172,7 @@ Response Header Transform Rules, or app-level `Access-Control-Allow-Origin`.
 
 | Phase | Content | Done when |
 |---|---|---|
-| 0 | Setup wrangler.jsonc (KV, vars), devDeps (`@aws-sdk/client-s3`, `aws4fetch`) | `wrangler dev` runs |
+| 0 | Setup nitro.config.ts (KV, vars), devDeps (`@aws-sdk/client-s3`, `aws4fetch`) | `npm run dev` runs |
 | 1 | Drive module: auth + folders + files (upload/download/delete/metadata) | unit tests, mocked fetch |
 | 2 | SigV4 verify: header + query auth, expiry/freshness | tests via aws4fetch |
 | 3 | Router: PUT/GET/HEAD/DELETE + List V1/V2 + bucket ops + error XML | e2e via `@aws-sdk/client-s3` |
@@ -183,8 +183,8 @@ Response Header Transform Rules, or app-level `Access-Control-Allow-Origin`.
 File structure:
 
 ```
-src/
-  index.ts          # Hono router, dispatch, error XML
+server/
+  index.ts          # h3 app: dispatch, error XML
   env.ts            # Env types
   s3/
     signature.ts    # SigV4 verify, expiry/freshness, (P2 chunked)

@@ -2,6 +2,8 @@
 
 S3-compatible endpoint for Google Drive, running on Cloudflare Workers. Works with rclone, aws cli, s3cmd, and AWS SDKs.
 
+Built with [h3](https://h3.dev) and [Nitro](https://nitro.build) (`cloudflare_module` preset).
+
 ## Architecture
 
 ```mermaid
@@ -61,10 +63,11 @@ wrangler secret put GOOGLE_CLIENT_SECRET
 wrangler secret put GOOGLE_REFRESH_TOKEN
 ```
 
-Vars (`wrangler.jsonc`): `REGION`, `ALLOWED_BUCKETS` (CSV or `*`), `PUBLIC_READ_BUCKETS`.
-KV bindings: `AUTH_KV`, `FOLDER_CACHE`.
+Vars (`nitro.config.ts`): `REGION`, `ALLOWED_BUCKETS` (CSV or `*`), `PUBLIC_READ_BUCKETS`.
+KV bindings (`nitro.config.ts`): `AUTH_KV`, `FOLDER_CACHE`.
 
-Deploy: `wrangler deploy`
+Build: `npm run build` (Nitro, `cloudflare_module` preset).
+Deploy: `npm run deploy`
 
 ## rclone config
 
@@ -91,5 +94,5 @@ force_path_style = true
 ```sh
 npm install
 npm test        # vitest
-npx wrangler dev
+npm run dev     # nitro build + wrangler dev (local KV bindings)
 ```
