@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { verifySignature } from '../src/s3/signature'
+import { verifySignature } from '../server/s3/signature'
 import { makeEnv } from './harness'
 import { makeAws } from './helpers'
 

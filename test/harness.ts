@@ -1,5 +1,5 @@
-import type { Env } from '../src/env'
-import { FOLDER_MIME } from '../src/drive/folder'
+import type { Env } from '../server/env'
+import { FOLDER_MIME } from '../server/drive/folder'
 
 export interface FakeDriveFile {
   id: string

@@ -1,4 +1,4 @@
-import { Hono } from 'hono'
+import { H3 } from 'h3'
 import type { Env } from './env'
 import { DRIVE_API, driveFetch } from './drive/auth'
 import { DriveError } from './drive/errors'
@@ -12,49 +12,56 @@ import * as xml from './s3/xml'
 import { decodeAwsChunked, isAwsChunked } from './s3/chunked'
 import { mapLimit, requestId, toHttpDate } from './util'
 
-const app = new Hono<{ Bindings: Env }>()
-
-/** Minimal execution context: only waitUntil is needed (for background GC). */
-interface WaitUntilCtx {
+interface ReqCtx {
+  env: Env
   waitUntil(promise: Promise<unknown>): void
 }
 
-app.all('*', async (c) => {
-  const env = c.env
-  const req = c.req.raw
+function reqCtx(event: { req: Request }): ReqCtx {
+  const cf = (event.req as unknown as {
+    runtime?: { cloudflare?: { env?: Env; context?: { waitUntil(p: Promise<unknown>): void } } }
+  }).runtime?.cloudflare
+  const env = cf?.env ?? (globalThis as { __env__?: Env }).__env__
+  return {
+    env: env as Env,
+    waitUntil: (promise) => {
+      if (cf?.context) cf.context.waitUntil(promise)
+      else void promise.catch(() => {})
+    },
+  }
+}
+
+const app = new H3({
+  onError: (error, event) => errorResponse(event.req as unknown as Request, event.url.pathname, error.cause ?? error),
+})
+
+app.all('/**', async (event) => {
+  const req = event.req as unknown as Request
   const method = req.method
-  const rawUrl = req.url
-  const url = new URL(rawUrl)
+  const url = event.url
   const rawPath = url.pathname
   const params = url.searchParams
 
   if (method === 'OPTIONS') return preflightResponse()
 
   try {
-    let execCtx: WaitUntilCtx | undefined
-    try {
-      execCtx = c.executionCtx
-    } catch {
-      // unavailable outside Workers (tests) — background work runs fire-and-forget
-    }
-    const res = await dispatch(env, req, method, rawPath, params, execCtx)
+    const { env, waitUntil } = reqCtx({ req })
+    const res = await dispatch(env, req, method, rawPath, params, waitUntil)
     const purge = purgeAfterWrite(env, method, rawPath)
-    if (purge) {
-      if (execCtx) execCtx.waitUntil(purge)
-      else void purge.catch(() => {})
-    }
+    if (purge) waitUntil(purge)
     return withCors(req, res)
   } catch (err) {
-    if (err instanceof DriveError) {
-      return withCors(req, xml.s3Error(err.status, err.code, err.message, rawPath, requestId()))
-    }
-    console.error('gdrive-s3 error:', err)
-    return withCors(
-      req,
-      xml.s3Error(500, 'InternalError', 'We encountered an internal error. Please try again.', rawPath, requestId()),
-    )
+    return errorResponse(req, rawPath, err)
   }
 })
+
+function errorResponse(req: Request, rawPath: string, error: unknown): Response {
+  if (error instanceof DriveError) {
+    return withCors(req, xml.s3Error(error.status, error.code, error.message, rawPath, requestId()))
+  }
+  console.error('gdrive-s3 error:', error)
+  return withCors(req, xml.s3Error(500, 'InternalError', 'We encountered an internal error. Please try again.', rawPath, requestId()))
+}
 
 async function dispatch(
   env: Env,
@@ -62,7 +69,7 @@ async function dispatch(
   method: string,
   rawPath: string,
   params: URLSearchParams,
-  execCtx?: WaitUntilCtx,
+  waitUntil: (promise: Promise<unknown>) => void,
 ): Promise<Response> {
   const { bucket, key } = parseRequest(rawPath)
 
@@ -105,7 +112,7 @@ async function dispatch(
 
   // ----- object-level operations -----
   const isUploadMethod = method === 'PUT' || method === 'POST'
-  if (isUploadMethod && params.has('uploads')) return handleCreateMultipart(env, req, bucket, key, execCtx)
+  if (isUploadMethod && params.has('uploads')) return handleCreateMultipart(env, req, bucket, key, waitUntil)
   if (params.has('uploadId')) {
     if (params.has('partNumber') && method === 'PUT') return handleUploadPart(env, req, bucket, key, params)
     if (method === 'POST') return handleCompleteMultipart(env, req, bucket, key, params)
@@ -116,7 +123,7 @@ async function dispatch(
     case 'PUT':
       return handlePutObject(env, req, bucket, key)
     case 'GET':
-      return handleGetObject(env, req, bucket, key, rawPath, execCtx)
+      return handleGetObject(env, req, bucket, key, rawPath, waitUntil)
     case 'HEAD':
       return handleHeadObject(env, bucket, key, rawPath)
     case 'DELETE':
@@ -297,7 +304,7 @@ async function handleGetObject(
   bucket: string,
   key: string,
   rawPath: string,
-  execCtx?: WaitUntilCtx,
+  waitUntil: (promise: Promise<unknown>) => void,
 ): Promise<Response> {
   const range = req.headers.get('range')
   const cacheable = !range && isPublicReadBucket(env, bucket)
@@ -333,8 +340,7 @@ async function handleGetObject(
   if (cacheable) {
     const cached = cachePublicGet(env, bucket, rawPath, response)
     if (cached) {
-      if (execCtx) execCtx.waitUntil(cached.stored)
-      else void cached.stored.catch(() => {})
+      waitUntil(cached.stored)
       response = cached.response
     }
   }
@@ -385,15 +391,19 @@ async function bufferIfSmall(
   return { body: null, data }
 }
 
-async function handleCreateMultipart(env: Env, req: Request, bucket: string, key: string, execCtx?: WaitUntilCtx): Promise<Response> {
+async function handleCreateMultipart(
+  env: Env,
+  req: Request,
+  bucket: string,
+  key: string,
+  waitUntil: (promise: Promise<unknown>) => void,
+): Promise<Response> {
   const bucketFolderId = await getOrCreateFolder(env, bucket, null)
   const { parentId, name } = await resolvePathCreate(env, bucketFolderId, key)
   const contentType = req.headers.get('content-type') ?? 'application/octet-stream'
   const { uploadId } = await createMultipart(env, { bucket, key, parentId, name, contentType })
   // Best-effort cleanup of abandoned sessions — never block the response on it.
-  const gc = gcMultipart(env, bucket)
-  if (execCtx) execCtx.waitUntil(gc)
-  else void gc.catch(() => {})
+  waitUntil(gcMultipart(env, bucket))
   return xml.initiateMultipartXml(bucket, key, uploadId)
 }
 

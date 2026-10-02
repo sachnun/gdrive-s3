@@ -1,6 +1,5 @@
-import type { Hono } from 'hono'
 import { AwsClient } from 'aws4fetch'
-import type { Env } from '../src/env'
+import type { Env } from '../server/env'
 import { FakeDrive, makeEnv, makeFetchStub, type FetchStub } from './harness'
 
 export const ACCESS_KEY = 'test-access'
@@ -11,16 +10,16 @@ export function makeAws(): AwsClient {
 }
 
 export interface TestCtx {
-  app: Hono<{ Bindings: Env }>
+  app: { fetch(req: Request): Response | Promise<Response> }
   env: Env
   drive: FakeDrive
   stub: FetchStub
   aws: AwsClient
 }
 
-let appPromise: Promise<Hono<{ Bindings: Env }>> | null = null
-export async function loadApp(): Promise<Hono<{ Bindings: Env }>> {
-  if (!appPromise) appPromise = import('../src/index').then((m) => m.default)
+let appPromise: Promise<TestCtx['app']> | null = null
+export async function loadApp(): Promise<TestCtx['app']> {
+  if (!appPromise) appPromise = import('../server/index').then((m) => m.default)
   return appPromise
 }
 
@@ -33,6 +32,7 @@ export async function setupTest(overrides: Partial<Env> = {}): Promise<TestSetup
   globalThis.fetch = stub as unknown as typeof fetch
   const app = await loadApp()
   const env = makeEnv(overrides)
+  ;(globalThis as { __env__?: unknown }).__env__ = env
   return {
     app,
     env,
@@ -41,6 +41,7 @@ export async function setupTest(overrides: Partial<Env> = {}): Promise<TestSetup
     aws: makeAws(),
     restore: () => {
       globalThis.fetch = original
+      delete (globalThis as { __env__?: unknown }).__env__
     },
   }
 }
@@ -55,7 +56,7 @@ export async function s3(
   const url = `http://localhost${path}`
   const signed = await ctx.aws.sign(url, { method, headers: opts.headers ?? {}, body: opts.body })
   signed.headers.set('host', 'localhost')
-  return ctx.app.fetch(signed, ctx.env)
+  return ctx.app.fetch(signed)
 }
 
 /** Sign a presigned (query auth) URL and dispatch without Authorization. */
@@ -68,7 +69,7 @@ export async function s3Presigned(
   const url = `http://localhost${path}`
   const signed = await ctx.aws.sign(url, { method, headers: opts.headers ?? {}, body: opts.body, aws: { signQuery: true } })
   signed.headers.set('host', 'localhost')
-  return ctx.app.fetch(signed, ctx.env)
+  return ctx.app.fetch(signed)
 }
 
 export async function bucketRootId(ctx: TestCtx, bucket: string): Promise<string> {

@@ -10,12 +10,11 @@
     ],
     "types": [
       "@cloudflare/workers-types"
-    ],
-    "jsx": "react-jsx",
-    "jsxImportSource": "hono/jsx"
+    ]
   },
   "include": [
-    "src",
-    "test"
+    "server",
+    "test",
+    "nitro.config.ts"
   ]
 }

@@ -239,13 +239,13 @@ describe('S3 e2e (aws4fetch as client)', () => {
     await s3(ctx, 'PUT', '/public-bucket', {})
     await s3(ctx, 'PUT', '/public-bucket/pub.txt', { body: 'open' })
     // unsigned request
-    const publicGet = await ctx.app.fetch(new Request('http://localhost/public-bucket/pub.txt', { method: 'GET' }), ctx.env)
+    const publicGet = await ctx.app.fetch(new Request('http://localhost/public-bucket/pub.txt', { method: 'GET' }))
     expect(publicGet.status).toBe(200)
     expect(await publicGet.text()).toBe('open')
 
     await s3(ctx, 'PUT', '/test-bucket', {})
     await s3(ctx, 'PUT', '/test-bucket/priv.txt', { body: 'closed' })
-    const privateGet = await ctx.app.fetch(new Request('http://localhost/test-bucket/priv.txt', { method: 'GET' }), ctx.env)
+    const privateGet = await ctx.app.fetch(new Request('http://localhost/test-bucket/priv.txt', { method: 'GET' }))
     expect(privateGet.status).toBe(403)
   })
 
@@ -262,7 +262,7 @@ describe('S3 e2e (aws4fetch as client)', () => {
         return inner(input, init)
       }) as typeof fetch
 
-      const get = () => ctx.app.fetch(new Request('http://localhost/public-bucket/pub.txt', { method: 'GET' }), ctx.env)
+      const get = () => ctx.app.fetch(new Request('http://localhost/public-bucket/pub.txt', { method: 'GET' }))
 
       // First GET goes to Drive and populates the cache.
       expect(await (await get()).text()).toBe('v1')
@@ -288,14 +288,11 @@ describe('S3 e2e (aws4fetch as client)', () => {
     try {
       await s3(ctx, 'PUT', '/public-bucket', {})
       await s3(ctx, 'PUT', '/public-bucket/range.txt', { body: 'abcdef' })
-      const r = await ctx.app.fetch(
-        new Request('http://localhost/public-bucket/range.txt', { headers: { Range: 'bytes=0-2' } }),
-        ctx.env,
-      )
+      const r = await ctx.app.fetch(new Request('http://localhost/public-bucket/range.txt', { headers: { Range: 'bytes=0-2' } }))
       expect(r.status).toBe(206)
       expect(await r.text()).toBe('abc')
       // Nothing was cached by the range request.
-      const full = await ctx.app.fetch(new Request('http://localhost/public-bucket/range.txt', { method: 'GET' }), ctx.env)
+      const full = await ctx.app.fetch(new Request('http://localhost/public-bucket/range.txt', { method: 'GET' }))
       expect(await full.text()).toBe('abcdef')
     } finally {
       removeCache()
@@ -304,10 +301,7 @@ describe('S3 e2e (aws4fetch as client)', () => {
 
   it('rejects unsigned writes and wrong signatures', async () => {
     await s3(ctx, 'PUT', '/test-bucket', {})
-    const unsigned = await ctx.app.fetch(
-      new Request('http://localhost/test-bucket/foo.txt', { method: 'PUT', body: 'x' }),
-      ctx.env,
-    )
+    const unsigned = await ctx.app.fetch(new Request('http://localhost/test-bucket/foo.txt', { method: 'PUT', body: 'x' }))
     expect(unsigned.status).toBe(403)
 
     const bad = await makeBadSignedPut(ctx)
@@ -403,7 +397,7 @@ describe('S3 e2e (aws4fetch as client)', () => {
       body: stream,
     })
     signed.headers.set('host', 'localhost')
-    const res = await ctx.app.fetch(signed, ctx.env)
+    const res = await ctx.app.fetch(signed)
     expect(res.status).toBe(200)
     expect(await (await s3(ctx, 'GET', '/test-bucket/chunked.bin')).text()).toBe('part1-part2')
   })
@@ -420,7 +414,6 @@ describe('S3 e2e (aws4fetch as client)', () => {
         method: 'OPTIONS',
         headers: { Origin: 'https://example.com', 'Access-Control-Request-Method': 'PUT' },
       }),
-      ctx.env,
     )
     expect(res.status).toBe(204)
     expect(res.headers.get('access-control-allow-origin')).toBe('*')
@@ -432,5 +425,5 @@ async function makeBadSignedPut(ctx: TestSetup): Promise<Response> {
   const badAws = new AwsClient({ accessKeyId: ACCESS_KEY, secretAccessKey: 'totally-wrong-secret', service: 's3', region: 'us-east-1' })
   const signed = await badAws.sign('http://localhost/test-bucket/foo.txt', { method: 'PUT', body: 'x' })
   signed.headers.set('host', 'localhost')
-  return ctx.app.fetch(signed, ctx.env)
+  return ctx.app.fetch(signed)
 }

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { DRIVE_API, driveFetch, getAccessToken, invalidateTokenCache, parseServiceAccounts } from '../src/drive/auth'
-import { FOLDER_MIME, findFolder, getOrCreateFolder, resolveExistingPath, resolvePathCreate } from '../src/drive/folder'
-import { downloadFile, findFilesInFolder, trashFile, uploadFile } from '../src/drive/files'
+import { DRIVE_API, driveFetch, getAccessToken, invalidateTokenCache, parseServiceAccounts } from '../server/drive/auth'
+import { FOLDER_MIME, findFolder, getOrCreateFolder, resolveExistingPath, resolvePathCreate } from '../server/drive/folder'
+import { downloadFile, findFilesInFolder, trashFile, uploadFile } from '../server/drive/files'
 import { FakeDrive, makeEnv, makeFetchStub } from './harness'
 
 describe('drive auth (KV-backed token)', () => {

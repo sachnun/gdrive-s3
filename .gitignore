@@ -1,5 +1,6 @@
 # prod
 dist/
+.output/
 
 # dev
 .yarn/
@@ -14,6 +15,7 @@ dist/
 # deps
 node_modules/
 .wrangler
+.nitro
 
 # env
 .env

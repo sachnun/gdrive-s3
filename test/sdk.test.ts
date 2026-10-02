@@ -35,7 +35,7 @@ class S3RequestHandler {
     const body = (request.body as BodyInit | undefined) ?? undefined
     const signed = await this.ctx.aws.sign(url, { method: request.method, headers, body })
     signed.headers.set('host', new URL(url).host)
-    const res = await this.ctx.app.fetch(signed, this.ctx.env)
+    const res = await this.ctx.app.fetch(signed)
     const buf = new Uint8Array(await res.arrayBuffer())
     const outHeaders: Record<string, string> = {}
     res.headers.forEach((v, k) => {
