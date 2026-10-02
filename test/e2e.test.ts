@@ -170,6 +170,113 @@ describe('S3 e2e (aws4fetch as client)', () => {
     expect(xml2).toContain('<Key>k2.txt</Key>')
   })
 
+  it('keeps max-keys across every page and never repeats a key', async () => {
+    await s3(ctx, 'PUT', '/test-bucket', {})
+    for (let i = 0; i < 3; i++) {
+      await s3(ctx, 'PUT', `/test-bucket/k${i}.txt`, { body: String(i) })
+    }
+    const seen: string[] = []
+    let token: string | null = null
+    for (let page = 0; page < 5; page++) {
+      const qs = `list-type=2&max-keys=1${token ? `&continuation-token=${encodeURIComponent(token)}` : ''}`
+      const xml = await (await s3(ctx, 'GET', `/test-bucket?${qs}`)).text()
+      const key = xmlTag(xml, 'Key')
+      if (key) seen.push(key)
+      token = xmlTag(xml, 'NextContinuationToken')
+      if (xmlTag(xml, 'IsTruncated') === 'false') break
+    }
+    expect(seen).toEqual(['k0.txt', 'k1.txt', 'k2.txt'])
+  })
+
+  it('resumes a page truncated mid-folder without losing or duplicating keys', async () => {
+    await s3(ctx, 'PUT', '/test-bucket', {})
+    await s3(ctx, 'PUT', '/test-bucket/a.txt', { body: 'a' })
+    await s3(ctx, 'PUT', '/test-bucket/dir/b.txt', { body: 'b' })
+    await s3(ctx, 'PUT', '/test-bucket/dir/c.txt', { body: 'c' })
+
+    const page1 = await (await s3(ctx, 'GET', '/test-bucket?list-type=2&max-keys=2')).text()
+    expect(xmlTag(page1, 'KeyCount')).toBe('2')
+    expect(xmlTag(page1, 'IsTruncated')).toBe('true')
+    expect(page1).toContain('<Key>a.txt</Key>')
+    expect(page1).toContain('<Key>dir/b.txt</Key>')
+    const token = xmlTag(page1, 'NextContinuationToken')
+    expect(token).toBeTruthy()
+
+    const page2 = await (
+      await s3(ctx, 'GET', `/test-bucket?list-type=2&max-keys=2&continuation-token=${encodeURIComponent(token!)}`)
+    ).text()
+    expect(xmlTag(page2, 'IsTruncated')).toBe('false')
+    expect(page2).toContain('<Key>dir/c.txt</Key>')
+    expect(page2).not.toContain('<Key>a.txt</Key>')
+    expect(page2).not.toContain('<Key>dir/b.txt</Key>')
+  })
+
+  it('paginates delimiter listings across pages without repeats', async () => {
+    await s3(ctx, 'PUT', '/test-bucket', {})
+    await s3(ctx, 'PUT', '/test-bucket/a.txt', { body: 'a' })
+    await s3(ctx, 'PUT', '/test-bucket/b.txt', { body: 'b' })
+    await s3(ctx, 'PUT', '/test-bucket/c.txt', { body: 'c' })
+    await s3(ctx, 'PUT', '/test-bucket/dir/d.txt', { body: 'd' })
+
+    const seen: string[] = []
+    let token: string | null = null
+    for (let page = 0; page < 5; page++) {
+      const qs = `list-type=2&delimiter=%2F&max-keys=2${token ? `&continuation-token=${encodeURIComponent(token)}` : ''}`
+      const xml = await (await s3(ctx, 'GET', `/test-bucket?${qs}`)).text()
+      seen.push(...[...xml.matchAll(/<Key>([^<]+)<\/Key>/g)].map((m) => m[1]))
+      seen.push(...[...xml.matchAll(/<Prefix>([^<]+)<\/Prefix>/g)].map((m) => m[1]))
+      token = xmlTag(xml, 'NextContinuationToken')
+      if (xmlTag(xml, 'IsTruncated') === 'false') break
+    }
+    expect(seen).toEqual(['a.txt', 'b.txt', 'c.txt', 'dir/'])
+  })
+
+  it('paginates recursive listings into subfolders without dropping keys', async () => {
+    await s3(ctx, 'PUT', '/test-bucket', {})
+    await s3(ctx, 'PUT', '/test-bucket/a.txt', { body: 'a' })
+    await s3(ctx, 'PUT', '/test-bucket/b.txt', { body: 'b' })
+    await s3(ctx, 'PUT', '/test-bucket/dir/c.txt', { body: 'c' })
+    await s3(ctx, 'PUT', '/test-bucket/dir/deep/d.txt', { body: 'd' })
+
+    const seen: string[] = []
+    let token: string | null = null
+    for (let page = 0; page < 10; page++) {
+      const qs = `list-type=2&max-keys=1${token ? `&continuation-token=${encodeURIComponent(token)}` : ''}`
+      const xml = await (await s3(ctx, 'GET', `/test-bucket?${qs}`)).text()
+      seen.push(...[...xml.matchAll(/<Key>([^<]+)<\/Key>/g)].map((m) => m[1]))
+      token = xmlTag(xml, 'NextContinuationToken')
+      if (xmlTag(xml, 'IsTruncated') === 'false') break
+    }
+    expect([...seen].sort()).toEqual(['a.txt', 'b.txt', 'dir/c.txt', 'dir/deep/d.txt'])
+    expect(new Set(seen).size).toBe(seen.length)
+  })
+
+  it('walks deep recursive trees with a bounded token', async () => {
+    await s3(ctx, 'PUT', '/test-bucket', {})
+    await s3(ctx, 'PUT', '/test-bucket/aa.txt', { body: '1' })
+    for (let i = 0; i < 12; i++) {
+      await s3(ctx, 'PUT', `/test-bucket/d${i}/f.txt`, { body: String(i) })
+    }
+    await s3(ctx, 'PUT', '/test-bucket/d0/nested/deep.txt', { body: 'deep' })
+
+    const seen: string[] = []
+    let token: string | null = null
+    let maxToken = 0
+    for (let page = 0; page < 30; page++) {
+      const qs = `list-type=2&max-keys=1${token ? `&continuation-token=${encodeURIComponent(token)}` : ''}`
+      const xml = await (await s3(ctx, 'GET', `/test-bucket?${qs}`)).text()
+      seen.push(...[...xml.matchAll(/<Key>([^<]+)<\/Key>/g)].map((m) => m[1]))
+      token = xmlTag(xml, 'NextContinuationToken')
+      if (token) maxToken = Math.max(maxToken, token.length)
+      if (xmlTag(xml, 'IsTruncated') === 'false') break
+    }
+    expect([...seen].sort()).toEqual(
+      ['aa.txt', 'd0/f.txt', 'd0/nested/deep.txt', ...[...Array(12).keys()].slice(1).map((i) => `d${i}/f.txt`)].sort(),
+    )
+    expect(new Set(seen).size).toBe(seen.length)
+    expect(maxToken).toBeLessThan(2000)
+  })
+
   it('lists an ETag that matches the object GET/HEAD ETag', async () => {
     await s3(ctx, 'PUT', '/test-bucket', {})
     await s3(ctx, 'PUT', '/test-bucket/e.txt', { body: 'etag' })

@@ -41,17 +41,17 @@ interface DriveChild {
   modifiedTime: string
 }
 
-interface QueueItem {
-  dirId: string
-  dirKey: string
-}
-
-interface ListState {
+interface Frame {
   dirId: string
   dirKey: string
   pageToken?: string
-  queue: QueueItem[]
   tail: string
+  /** Plain name of the last entry handled in this dir; the resume cursor. */
+  afterName: string
+}
+
+interface ListState {
+  stack: Frame[]
 }
 
 function b64encode(s: string): string {
@@ -75,13 +75,18 @@ function encodeToken(state: ListState): string {
 function decodeToken(token: string): ListState | null {
   const b64 = token.startsWith(TOKEN_PREFIX) ? token.slice(TOKEN_PREFIX.length) : token
   try {
-    return JSON.parse(b64decode(b64)) as ListState
+    const parsed = JSON.parse(b64decode(b64)) as ListState
+    return Array.isArray(parsed?.stack) ? parsed : null
   } catch {
     return null
   }
 }
 
-async function listDrivePage(env: Env, dirId: string, pageToken?: string): Promise<{ entries: DriveChild[]; nextPageToken?: string }> {
+async function listDrivePage(
+  env: Env,
+  dirId: string,
+  pageToken?: string,
+): Promise<{ entries: DriveChild[]; nextPageToken?: string }> {
   const q = `'${dirId}' in parents and trashed=false`
   let url = `${DRIVE_API}/drive/v3/files?q=${encodeURIComponent(q)}&pageSize=1000&fields=nextPageToken,files(id,name,mimeType,size,modifiedTime)&spaces=drive&orderBy=name`
   if (pageToken) url += `&pageToken=${pageToken}`
@@ -135,14 +140,14 @@ export async function listObjects(env: Env, bucketFolderId: string | null, opts:
     if (!bucketFolderId) return empty()
     const { dirId, dirKey, tail } = await resolvePrefixDir(env, bucketFolderId, prefix)
     if (!dirId) return empty()
-    state = { dirId, dirKey, pageToken: undefined, queue: [], tail }
+    state = { stack: [{ dirId, dirKey, tail, afterName: '' }] }
   }
 
-  // Keys to skip on the first pass (V1 marker as plain key / V2 start-after).
-  let skip: string | null = null
+  // A plain V1 marker / V2 start-after is a full key and applies to every directory.
+  let userSkip: string | null = null
   if (!opts.continuationToken) {
-    if (opts.marker && !opts.marker.startsWith(TOKEN_PREFIX)) skip = opts.marker
-    else if (opts.startAfter) skip = opts.startAfter
+    if (opts.marker && !opts.marker.startsWith(TOKEN_PREFIX)) userSkip = opts.marker
+    else if (opts.startAfter) userSkip = opts.startAfter
   }
 
   const contents: ListEntry[] = []
@@ -150,35 +155,63 @@ export async function listObjects(env: Env, bucketFolderId: string | null, opts:
   let isTruncated = false
   let keyCount = 0
 
-  while (state && keyCount < maxKeys) {
-    const cur = state
-    const page = await listDrivePage(env, cur.dirId, cur.pageToken)
-    cur.pageToken = page.nextPageToken
+  // Descending keeps the parent on its current Drive page (its token must not
+  // advance past unread entries), so cache that page: the parent is revisited
+  // on the way back up and would otherwise refetch it for every subfolder.
+  const pageCache = new Map<string, Promise<{ entries: DriveChild[]; nextPageToken?: string }>>()
+  const fetchPage = (frame: Frame) => {
+    const key = `${frame.dirId}:${frame.pageToken ?? ''}`
+    let hit = pageCache.get(key)
+    if (!hit) {
+      hit = listDrivePage(env, frame.dirId, frame.pageToken)
+      pageCache.set(key, hit)
+    }
+    return hit
+  }
+
+  // Depth-first walk driven by an explicit stack. The stack is the pagination
+  // cursor, so a token stays proportional to the folder depth, never to the
+  // number of sibling folders a directory happens to contain.
+  while (state.stack.length > 0 && keyCount < maxKeys) {
+    const cur = state.stack[state.stack.length - 1]
+    const page = await fetchPage(cur)
 
     let entries = page.entries
     if (cur.tail) entries = entries.filter((e) => e.name.startsWith(cur.tail))
     entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
 
+    // `afterName` is this frame's cursor: entries at or before it were already
+    // returned, so a resumed page replays them without emitting duplicates.
+    if (cur.afterName) entries = entries.filter((e) => e.name > cur.afterName!)
+
+    // A page cut short by max-keys must not consume its Drive page token: that
+    // token only covers fully read pages, and `afterName` resumes inside it.
+    let pageDone = true
     for (const e of entries) {
       if (keyCount >= maxKeys) {
         isTruncated = true
+        pageDone = false
         break
       }
       const isFolder = e.mimeType === FOLDER_MIME
       const entryKey = cur.dirKey + e.name
+      cur.afterName = e.name
       if (isFolder && delimiter) {
         const cp = entryKey + '/'
-        if (skip && cp <= skip) continue
+        if (userSkip && cp <= userSkip) continue
         if (!commonPrefixes.has(cp)) {
           commonPrefixes.add(cp)
           keyCount++
         }
       } else if (isFolder) {
-        // Recursive mode (delimiter=""): folder is not a key itself; queue its contents.
-        if (skip && entryKey + '/' <= skip) continue
-        cur.queue.push({ dirId: e.id, dirKey: entryKey + '/' })
+        // Recursive mode: descend by pushing a frame. The parent frame keeps the
+        // page token it is on and only advances `afterName`, so the entries that
+        // follow this folder on the same page are still read on the way back up.
+        state.stack.push({ dirId: e.id, dirKey: entryKey + '/', tail: '', afterName: '' })
+        pageDone = false
+        break
       } else {
-        if (skip && entryKey <= skip) continue
+        if (userSkip && entryKey <= userSkip) continue
         contents.push({
           key: entryKey,
           lastModified: e.modifiedTime,
@@ -188,17 +221,15 @@ export async function listObjects(env: Env, bucketFolderId: string | null, opts:
         keyCount++
       }
     }
+    if (!pageDone) continue
 
+    cur.pageToken = page.nextPageToken
     if (keyCount >= maxKeys) {
-      if (!isTruncated && (cur.pageToken || cur.queue.length > 0)) isTruncated = true
+      if (cur.pageToken || state.stack.length > 1) isTruncated = true
       break
     }
     if (cur.pageToken) continue // more pages in the current dir
-    const next = cur.queue.shift()
-    if (!next) break
-    cur.dirId = next.dirId
-    cur.dirKey = next.dirKey
-    cur.tail = ''
+    state.stack.pop() // directory exhausted; return to the parent frame
   }
 
   const result: ListResult = {
@@ -207,7 +238,7 @@ export async function listObjects(env: Env, bucketFolderId: string | null, opts:
     isTruncated,
     keyCount,
   }
-  if (isTruncated && state) {
+  if (isTruncated) {
     const token = encodeToken(state)
     result.nextContinuationToken = token
     result.nextMarker = token
