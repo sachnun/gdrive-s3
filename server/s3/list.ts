@@ -20,6 +20,8 @@ export interface ListOptions {
   startAfter?: string
   isV2: boolean
   encodingType?: string
+  /** Override the Drive-call budget (tests); defaults to DRIVE_CALL_BUDGET. */
+  budget?: number
 }
 
 export interface ListResult {
@@ -32,6 +34,14 @@ export interface ListResult {
 }
 
 const TOKEN_PREFIX = 'gds3:'
+
+/**
+ * Drive calls one listing may spend. Cloudflare Workers cap subrequests per
+ * invocation (50 on the free plan) and a recursive walk costs one call per
+ * folder, so the walk stops early and hands the client a continuation token
+ * instead of failing the whole request.
+ */
+const DRIVE_CALL_BUDGET = 40
 
 interface DriveChild {
   id: string
@@ -123,6 +133,7 @@ async function resolvePrefixDir(
  */
 export async function listObjects(env: Env, bucketFolderId: string | null, opts: ListOptions): Promise<ListResult> {
   const { prefix, delimiter, maxKeys } = opts
+  const budget = opts.budget ?? DRIVE_CALL_BUDGET
   const empty = (): ListResult => ({
     contents: [],
     commonPrefixes: [],
@@ -159,10 +170,12 @@ export async function listObjects(env: Env, bucketFolderId: string | null, opts:
   // advance past unread entries), so cache that page: the parent is revisited
   // on the way back up and would otherwise refetch it for every subfolder.
   const pageCache = new Map<string, Promise<{ entries: DriveChild[]; nextPageToken?: string }>>()
+  let calls = 0
   const fetchPage = (frame: Frame) => {
     const key = `${frame.dirId}:${frame.pageToken ?? ''}`
     let hit = pageCache.get(key)
     if (!hit) {
+      calls++
       hit = listDrivePage(env, frame.dirId, frame.pageToken)
       pageCache.set(key, hit)
     }
@@ -174,6 +187,12 @@ export async function listObjects(env: Env, bucketFolderId: string | null, opts:
   // number of sibling folders a directory happens to contain.
   while (state.stack.length > 0 && keyCount < maxKeys) {
     const cur = state.stack[state.stack.length - 1]
+    // Budget exhausted: stop before the platform kills the request and let the
+    // client resume from the cursor we have already advanced to.
+    if (calls >= budget) {
+      isTruncated = true
+      break
+    }
     const page = await fetchPage(cur)
 
     let entries = page.entries
