@@ -1,5 +1,5 @@
 import type { Env } from '../env'
-import { randomHex, sha256Hex } from '../util'
+import { randomHex } from '../util'
 import { DRIVE_API, driveFetch } from './auth'
 import { DriveError } from './errors'
 import { FOLDER_MIME, findCachedFolder, getOrCreateFolder } from './folder'
@@ -81,7 +81,8 @@ export async function uploadPart(
     appProperties: { partNumber: n, uploadId },
     data,
   })
-  const etag = await sha256Hex(meta.id)
+  // ETag = Drive file id, matching PutObject/HeadObject so clients can compare them.
+  const etag = meta.id
   state.parts[n] = { fileId: meta.id, size: meta.size ? Number(meta.size) : (size ?? 0), etag }
   await env.FOLDER_CACHE.put(stateKey(uploadId), JSON.stringify(state))
   return { etag }
@@ -102,7 +103,7 @@ async function reconcileParts(env: Env, state: MultipartState): Promise<void> {
     }
     for (const f of data.files) {
       const n = f.appProperties?.partNumber
-      if (n) state.parts[n] = { fileId: f.id, size: f.size ? Number(f.size) : 0, etag: await sha256Hex(f.id) }
+      if (n) state.parts[n] = { fileId: f.id, size: f.size ? Number(f.size) : 0, etag: f.id }
     }
     pageToken = data.nextPageToken
     if (!pageToken) break
