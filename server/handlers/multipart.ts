@@ -45,12 +45,13 @@ export async function handleCompleteMultipart(
   bucket: string,
   key: string,
   params: URLSearchParams,
+  region: string,
 ): Promise<Response> {
   const uploadId = params.get('uploadId') ?? ''
   const body = await req.text()
   const parts = extractParts(body)
   const { etag } = await completeMultipart(env, uploadId, parts)
-  return xml.completeMultipartXml(bucket, key, etag, env.REGION || 'us-east-1')
+  return xml.completeMultipartXml(bucket, key, etag, region)
 }
 
 export async function handleAbortMultipart(

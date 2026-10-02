@@ -1,8 +1,9 @@
 import type { Env } from '../env'
+import { BUCKETS } from '../config'
 import { DRIVE_API, driveFetch } from '../drive/auth'
 import { DriveError } from '../drive/errors'
-import { FOLDER_MIME, findCachedFolder, findFolder, folderCacheKey, getOrCreateFolder, resolveExistingPath } from '../drive/folder'
-import { findFilesInFolder, getFileMeta, trashFile } from '../drive/files'
+import { FOLDER_MIME, findCachedFolder, folderCacheKey, getOrCreateFolder, resolveExistingPath } from '../drive/folder'
+import { findFilesInFolder, trashFile } from '../drive/files'
 import { MULTIPART_ROOT } from '../drive/multipart'
 import { extractXmlKeys } from '../s3/request'
 import { listObjects, type ListOptions } from '../s3/list'
@@ -13,10 +14,8 @@ import { mapLimit, requestId } from '../util'
 const DELETE_OBJECTS_CONCURRENCY = 8
 
 export async function handleListBuckets(env: Env): Promise<Response> {
-  const allowed = (env.ALLOWED_BUCKETS ?? '').split(',').map((s) => s.trim()).filter(Boolean)
-  const wildcard = allowed.includes('*')
+  const allowed = BUCKETS === '*' ? null : BUCKETS
   const buckets: { name: string; creationDate: string }[] = []
-  const found = new Set<string>()
   let pageToken: string | undefined
   for (let page = 0; page < 10; page++) {
     const q = `mimeType='${FOLDER_MIME}' and 'root' in parents and trashed=false`
@@ -28,26 +27,11 @@ export async function handleListBuckets(env: Env): Promise<Response> {
     for (const f of data.files) {
       // Internal multipart temp storage is never exposed as a bucket.
       if (f.name === MULTIPART_ROOT) continue
-      if ((wildcard || allowed.includes(f.name)) && !found.has(f.name)) {
-        buckets.push({ name: f.name, creationDate: f.createdTime })
-        found.add(f.name)
-      }
+      if (allowed && !allowed.includes(f.name)) continue
+      buckets.push({ name: f.name, creationDate: f.createdTime })
     }
     pageToken = data.nextPageToken
     if (!pageToken) break
-  }
-  // Fallback for allowed buckets not seen in the root listing (e.g. >1000 root folders).
-  for (const name of allowed) {
-    if (found.has(name)) continue
-    const id = await findFolder(env, name, null)
-    if (id) {
-      try {
-        const meta = await getFileMeta(env, id)
-        buckets.push({ name, creationDate: meta.createdTime ?? '' })
-      } catch {
-        buckets.push({ name, creationDate: '' })
-      }
-    }
   }
   buckets.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
   return xml.listBucketsXml(buckets)
@@ -71,10 +55,10 @@ export async function handleCreateBucket(env: Env, bucket: string): Promise<Resp
   return new Response(null, { status: 200, headers: { 'x-amz-request-id': requestId() } })
 }
 
-export async function handleGetBucketLocation(env: Env, bucket: string): Promise<Response> {
+export async function handleGetBucketLocation(env: Env, bucket: string, region: string): Promise<Response> {
   const id = await findCachedFolder(env, bucket, null)
   if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
-  return xml.locationXml(env.REGION || 'us-east-1')
+  return xml.locationXml(region)
 }
 
 export async function handleListObjects(

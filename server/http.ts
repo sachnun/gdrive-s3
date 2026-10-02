@@ -1,22 +1,6 @@
-import type { Env } from './env'
 import { DriveError } from './drive/errors'
-import { isPublicReadBucket } from './s3/access'
-import { parseRequest } from './s3/request'
-import { purgePublicCache } from './edge-cache'
 import * as xml from './s3/xml'
 import { requestId } from './util'
-
-/**
- * Purges the edge-cache entry after a mutating request on a public-read
- * bucket. Bucket-level DeleteObjects (?delete on the root path) cannot be
- * mapped to individual keys here — those entries expire via TTL instead.
- */
-export function purgeAfterWrite(env: Env, method: string, rawPath: string): Promise<void> | null {
-  if (method !== 'PUT' && method !== 'POST' && method !== 'DELETE') return null
-  const { bucket, key } = parseRequest(rawPath)
-  if (!bucket || !key || !isPublicReadBucket(env, bucket)) return null
-  return purgePublicCache(env, rawPath)
-}
 
 export function errorResponse(req: Request, rawPath: string, error: unknown): Response {
   if (error instanceof DriveError) {

@@ -5,8 +5,8 @@ import { FakeDrive, makeEnv, makeFetchStub, type FetchStub } from './fakes'
 export const ACCESS_KEY = 'test-access'
 export const SECRET_KEY = 'test-secret-1234567890'
 
-export function makeAws(): AwsClient {
-  return new AwsClient({ accessKeyId: ACCESS_KEY, secretAccessKey: SECRET_KEY, service: 's3', region: 'us-east-1' })
+export function makeAws(region = 'us-east-1'): AwsClient {
+  return new AwsClient({ accessKeyId: ACCESS_KEY, secretAccessKey: SECRET_KEY, service: 's3', region })
 }
 
 export interface TestCtx {

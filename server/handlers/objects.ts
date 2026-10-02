@@ -2,8 +2,6 @@ import type { Env } from '../env'
 import { DriveError } from '../drive/errors'
 import { findCachedFolder, resolveExistingPath, resolvePathCreate, getOrCreateFolder } from '../drive/folder'
 import { copyFile, downloadFile, findFilesInFolder, trashFile, uploadFile } from '../drive/files'
-import { cachePublicGet, matchPublicGet } from '../edge-cache'
-import { isPublicReadBucket } from '../s3/access'
 import { bufferIfSmall, uploadBody } from '../s3/request'
 import * as xml from '../s3/xml'
 import { requestId, toHttpDate } from '../util'
@@ -53,23 +51,10 @@ async function handleCopyObject(
   return xml.copyObjectXml(copied.id, copied.modifiedTime ?? new Date().toISOString())
 }
 
-export async function handleGetObject(
-  env: Env,
-  req: Request,
-  bucket: string,
-  key: string,
-  rawPath: string,
-  waitUntil: (promise: Promise<unknown>) => void,
-): Promise<Response> {
-  const range = req.headers.get('range')
-  const cacheable = !range && isPublicReadBucket(env, bucket)
-  if (cacheable) {
-    const hit = await matchPublicGet(env, bucket, rawPath)
-    if (hit) return hit
-  }
+export async function handleGetObject(env: Env, req: Request, bucket: string, key: string): Promise<Response> {
   const file = await findObject(env, bucket, key)
   if (!file) return xml.s3Error(404, 'NoSuchKey', 'The specified key does not exist.', `/${bucket}/${key}`, requestId())
-  const res = await downloadFile(env, file.id, range)
+  const res = await downloadFile(env, file.id, req.headers.get('range'))
   if (res.status === 404) {
     return xml.s3Error(404, 'NoSuchKey', 'The specified key does not exist.', `/${bucket}/${key}`, requestId())
   }
@@ -91,24 +76,10 @@ export async function handleGetObject(
   if (res.status !== 200) {
     throw new DriveError(502, 'InternalError', `Drive download failed (HTTP ${res.status})`)
   }
-  let response = new Response(res.body, { status: 200, headers })
-  if (cacheable) {
-    const cached = cachePublicGet(env, bucket, rawPath, response)
-    if (cached) {
-      waitUntil(cached.stored)
-      response = cached.response
-    }
-  }
-  return response
+  return new Response(res.body, { status: 200, headers })
 }
 
-export async function handleHeadObject(env: Env, bucket: string, key: string, rawPath: string): Promise<Response> {
-  // Serve from the edge-cache entry when present (avoids the Drive metadata
-  // round-trip for public buckets).
-  if (isPublicReadBucket(env, bucket)) {
-    const hit = await matchPublicGet(env, bucket, rawPath)
-    if (hit) return new Response(null, { status: 200, headers: new Headers(hit.headers) })
-  }
+export async function handleHeadObject(env: Env, bucket: string, key: string): Promise<Response> {
   const file = await findObject(env, bucket, key)
   if (!file) return xml.s3Error(404, 'NoSuchKey', 'The specified key does not exist.', `/${bucket}/${key}`, requestId())
   const headers: Record<string, string> = {

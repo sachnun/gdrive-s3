@@ -11,19 +11,19 @@ describe('AWS SigV4 verification', () => {
   it('accepts valid header auth GET', async () => {
     const signed = await makeAws().sign('http://localhost/test-bucket/hello.txt', { method: 'GET' })
     signed.headers.set('host', 'localhost')
-    expect(await verifySignature(makeEnv(), signed)).toEqual({ ok: true })
+    expect(await verifySignature(makeEnv(), signed)).toEqual({ ok: true, region: 'us-east-1' })
   })
 
   it('accepts valid header auth PUT with body', async () => {
     const signed = await makeAws().sign('http://localhost/test-bucket/key', { method: 'PUT', body: 'hello world' })
     signed.headers.set('host', 'localhost')
-    expect(await verifySignature(makeEnv(), signed)).toEqual({ ok: true })
+    expect(await verifySignature(makeEnv(), signed)).toEqual({ ok: true, region: 'us-east-1' })
   })
 
   it('accepts requests with query strings', async () => {
     const signed = await makeAws().sign('http://localhost/test-bucket?list-type=2&delimiter=%2F&prefix=a%2Fb', { method: 'GET' })
     signed.headers.set('host', 'localhost')
-    expect(await verifySignature(makeEnv(), signed)).toEqual({ ok: true })
+    expect(await verifySignature(makeEnv(), signed)).toEqual({ ok: true, region: 'us-east-1' })
   })
 
   it('rejects wrong secret', async () => {
@@ -71,7 +71,15 @@ describe('AWS SigV4 verification', () => {
   it('accepts presigned GET', async () => {
     const signed = await makeAws().sign('http://localhost/test-bucket/hello.txt', { method: 'GET', aws: { signQuery: true } })
     signed.headers.set('host', 'localhost')
-    expect(await verifySignature(makeEnv(), signed)).toEqual({ ok: true })
+    expect(await verifySignature(makeEnv(), signed)).toEqual({ ok: true, region: 'us-east-1' })
+  })
+
+  it('accepts any signing region and reports it back', async () => {
+    for (const region of ['ap-southeast-1', 'eu-west-3', 'us-gov-west-1', 'auto']) {
+      const signed = await makeAws(region).sign('http://localhost/test-bucket/hello.txt', { method: 'GET' })
+      signed.headers.set('host', 'localhost')
+      expect(await verifySignature(makeEnv(), signed), region).toEqual({ ok: true, region })
+    }
   })
 
   it('rejects expired presigned URL (aws4fetch default 86400s expiry)', async () => {

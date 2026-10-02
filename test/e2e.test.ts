@@ -1,25 +1,6 @@
 import { AwsClient } from 'aws4fetch'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { ACCESS_KEY, bucketRootId, s3, s3Presigned, setupTest, xmlTag, type TestSetup } from './helpers'
-
-/** Installs an in-memory Cache API so edge-cache code paths run under Node. */
-function installMemoryCache(): () => void {
-  const store = new Map<string, Response>()
-  ;(globalThis as { caches?: unknown }).caches = {
-    default: {
-      match: async (req: Request) => store.get(req.url),
-      put: async (req: Request, res: Response) => {
-        store.set(req.url, new Response(await res.text(), { status: res.status, headers: res.headers }))
-      },
-      delete: async (req: Request) => store.delete(req.url),
-    },
-  }
-  return () => {
-    delete (globalThis as { caches?: unknown }).caches
-  }
-}
-
-const tick = () => new Promise((r) => setTimeout(r, 0))
+import { ACCESS_KEY, bucketRootId, makeAws, s3, s3Presigned, setupTest, xmlTag, type TestSetup } from './helpers'
 
 describe('S3 e2e (aws4fetch as client)', () => {
   let ctx: TestSetup
@@ -39,6 +20,15 @@ describe('S3 e2e (aws4fetch as client)', () => {
     const lb = await s3(ctx, 'GET', '/')
     expect(lb.status).toBe(200)
     expect(await lb.text()).toContain('<Name>test-bucket</Name>')
+  })
+
+  it('GetBucketLocation echoes the signing region (any region accepted)', async () => {
+    await s3(ctx, 'PUT', '/test-bucket', {})
+    const signed = await makeAws('ap-southeast-1').sign('http://localhost/test-bucket?location', { method: 'GET' })
+    signed.headers.set('host', 'localhost')
+    const res = await ctx.app.fetch(signed)
+    expect(res.status).toBe(200)
+    expect(await res.text()).toContain('<LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">ap-southeast-1</LocationConstraint>')
   })
 
   it('put/get/head/delete object with folder hierarchy', async () => {
@@ -352,68 +342,25 @@ describe('S3 e2e (aws4fetch as client)', () => {
     expect((await s3(ctx, 'GET', '/test-bucket/x2.txt')).status).toBe(404)
   })
 
-  it('public read bucket: unsigned GET works; private bucket requires signature', async () => {
-    await s3(ctx, 'PUT', '/public-bucket', {})
-    await s3(ctx, 'PUT', '/public-bucket/pub.txt', { body: 'open' })
-    // unsigned request
-    const publicGet = await ctx.app.fetch(new Request('http://localhost/public-bucket/pub.txt', { method: 'GET' }))
-    expect(publicGet.status).toBe(200)
-    expect(await publicGet.text()).toBe('open')
-
+  it('unsigned object GET is rejected (no public-read buckets)', async () => {
     await s3(ctx, 'PUT', '/test-bucket', {})
     await s3(ctx, 'PUT', '/test-bucket/priv.txt', { body: 'closed' })
-    const privateGet = await ctx.app.fetch(new Request('http://localhost/test-bucket/priv.txt', { method: 'GET' }))
-    expect(privateGet.status).toBe(403)
+    const res = await ctx.app.fetch(new Request('http://localhost/test-bucket/priv.txt', { method: 'GET' }))
+    expect(res.status).toBe(403)
+    expect(await res.text()).toContain('AccessDenied')
   })
 
-  it('public bucket GET is edge-cached and purged on overwrite', async () => {
-    const removeCache = installMemoryCache()
-    try {
-      await s3(ctx, 'PUT', '/public-bucket', {})
-      await s3(ctx, 'PUT', '/public-bucket/pub.txt', { body: 'v1' })
+  it('ListBuckets requires a signature and never leaks bucket names anonymously', async () => {
+    await s3(ctx, 'PUT', '/test-bucket', {})
+    const anon = await ctx.app.fetch(new Request('http://localhost/', { method: 'GET' }))
+    expect(anon.status).toBe(403)
+    const body = await anon.text()
+    expect(body).toContain('AccessDenied')
+    expect(body).not.toContain('test-bucket')
 
-      let driveDownloads = 0
-      const inner = globalThis.fetch
-      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-        if (String(input).includes('alt=media')) driveDownloads++
-        return inner(input, init)
-      }) as typeof fetch
-
-      const get = () => ctx.app.fetch(new Request('http://localhost/public-bucket/pub.txt', { method: 'GET' }))
-
-      // First GET goes to Drive and populates the cache.
-      expect(await (await get()).text()).toBe('v1')
-      await tick()
-      // Second GET is served from the cache without touching Drive.
-      const r2 = await get()
-      expect(await r2.text()).toBe('v1')
-      expect(r2.headers.get('Cache-Control')).toContain('max-age=300')
-      expect(driveDownloads).toBe(1)
-
-      // Overwrite purges the entry; the next GET fetches fresh content.
-      await s3(ctx, 'PUT', '/public-bucket/pub.txt', { body: 'v2' })
-      await tick()
-      expect(await (await get()).text()).toBe('v2')
-      expect(driveDownloads).toBe(2)
-    } finally {
-      removeCache()
-    }
-  })
-
-  it('range GETs on public buckets bypass the edge cache', async () => {
-    const removeCache = installMemoryCache()
-    try {
-      await s3(ctx, 'PUT', '/public-bucket', {})
-      await s3(ctx, 'PUT', '/public-bucket/range.txt', { body: 'abcdef' })
-      const r = await ctx.app.fetch(new Request('http://localhost/public-bucket/range.txt', { headers: { Range: 'bytes=0-2' } }))
-      expect(r.status).toBe(206)
-      expect(await r.text()).toBe('abc')
-      // Nothing was cached by the range request.
-      const full = await ctx.app.fetch(new Request('http://localhost/public-bucket/range.txt', { method: 'GET' }))
-      expect(await full.text()).toBe('abcdef')
-    } finally {
-      removeCache()
-    }
+    const signed = await s3(ctx, 'GET', '/')
+    expect(signed.status).toBe(200)
+    expect(await signed.text()).toContain('<Name>test-bucket</Name>')
   })
 
   it('rejects unsigned writes and wrong signatures', async () => {
@@ -426,37 +373,21 @@ describe('S3 e2e (aws4fetch as client)', () => {
     expect(await bad.text()).toContain('SignatureDoesNotMatch')
   })
 
-  it('rejects disallowed buckets', async () => {
-    const res = await s3(ctx, 'GET', '/other-bucket')
-    expect(res.status).toBe(403)
-    expect(await res.text()).toContain('AccessDenied')
-  })
-
-  it('wildcard ALLOWED_BUCKETS grants full access (AWS root semantics)', async () => {
-    const w = await setupTest({ ALLOWED_BUCKETS: '*' })
-    try {
-      expect((await s3(w, 'PUT', '/anything-goes')).status).toBe(200)
-      expect((await s3(w, 'HEAD', '/anything-goes')).status).toBe(200)
-      const lb = await s3(w, 'GET', '/')
-      const xml = await lb.text()
-      expect(xml).toContain('<Name>anything-goes</Name>')
-      // internal multipart storage must never surface as a bucket
-      expect(xml).not.toContain('.gdrive-s3-multipart')
-    } finally {
-      w.restore()
-    }
+  it('wildcard bucket allowlist grants full access (AWS root semantics)', async () => {
+    expect((await s3(ctx, 'PUT', '/anything-goes')).status).toBe(200)
+    expect((await s3(ctx, 'HEAD', '/anything-goes')).status).toBe(200)
+    const lb = await s3(ctx, 'GET', '/')
+    const xml = await lb.text()
+    expect(xml).toContain('<Name>anything-goes</Name>')
+    // internal multipart storage must never surface as a bucket
+    expect(xml).not.toContain('.gdrive-s3-multipart')
   })
 
   it('rejects invalid bucket names per AWS naming rules', async () => {
-    const w = await setupTest({ ALLOWED_BUCKETS: '*' })
-    try {
-      for (const name of ['ab', 'Upper-case', 'double..dot', '-leadingdash', 'trailingdash-', 'x'.repeat(64)]) {
-        const res = await s3(w, 'PUT', `/${name}`)
-        expect(res.status, name).toBe(400)
-        expect(await res.text(), name).toContain('InvalidBucketName')
-      }
-    } finally {
-      w.restore()
+    for (const name of ['ab', 'Upper-case', 'double..dot', '-leadingdash', 'trailingdash-', 'x'.repeat(64)]) {
+      const res = await s3(ctx, 'PUT', `/${name}`)
+      expect(res.status, name).toBe(400)
+      expect(await res.text(), name).toContain('InvalidBucketName')
     }
   })
 
@@ -519,10 +450,14 @@ describe('S3 e2e (aws4fetch as client)', () => {
     expect(await (await s3(ctx, 'GET', '/test-bucket/chunked.bin')).text()).toBe('part1-part2')
   })
 
-  it('rejects dot-dot segments (URL normalization → unknown bucket → AccessDenied)', async () => {
-    const res = await s3(ctx, 'PUT', '/test-bucket/%2E%2E/escape', { body: 'x' })
-    // the URL parser collapses dot segments, so this must never reach a Drive path
-    expect(res.status).toBe(403)
+  it('dot-dot segments never escape into another bucket', async () => {
+    await s3(ctx, 'PUT', '/test-bucket', {})
+    await s3(ctx, 'PUT', '/test-bucket/keep.txt', { body: 'keep' })
+    // the URL parser collapses dot segments, so this creates the bucket "escape", never test-bucket/escape
+    await s3(ctx, 'PUT', '/test-bucket/%2E%2E/escape', { body: 'x' })
+    expect((await s3(ctx, 'GET', '/test-bucket/escape')).status).toBe(404)
+    expect(await (await s3(ctx, 'GET', '/test-bucket/keep.txt')).text()).toBe('keep')
+    expect((await s3(ctx, 'HEAD', '/escape')).status).toBe(200)
   })
 
   it('CORS preflight responds 204 with allow headers', async () => {

@@ -393,12 +393,9 @@ export function makeEnv(overrides: Partial<Env> = {}): Env {
   return {
     ACCESS_KEY: 'test-access',
     SECRET_KEY: 'test-secret-1234567890',
-    REGION: 'us-east-1',
     GOOGLE_CLIENT_ID: 'client-id',
     GOOGLE_CLIENT_SECRET: 'client-secret',
     GOOGLE_REFRESH_TOKEN: 'refresh-token',
-    ALLOWED_BUCKETS: 'test-bucket,public-bucket',
-    PUBLIC_READ_BUCKETS: 'public-bucket',
     AUTH_KV: new FakeKV() as unknown as KVNamespace,
     FOLDER_CACHE: new FakeKV() as unknown as KVNamespace,
     ...overrides,

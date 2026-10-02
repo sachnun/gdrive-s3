@@ -13,11 +13,7 @@ export default defineConfig({
         { binding: 'AUTH_KV', id: '20d3356495224a658e481b8d8ff407b5' },
         { binding: 'FOLDER_CACHE', id: '1fc672eb19da4028b2ef35dcb2bf273a' },
       ],
-      vars: {
-        REGION: 'us-east-1',
-        ALLOWED_BUCKETS: '*',
-        PUBLIC_READ_BUCKETS: '',
-      },
+      vars: {},
       observability: {
         enabled: true,
         head_sampling_rate: 1,

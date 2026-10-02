@@ -1,6 +1,6 @@
 import type { Env } from '../env'
 
-export type SigResult = { ok: true } | { ok: false; status: number; code: string; message: string }
+export type SigResult = { ok: true; region: string } | { ok: false; status: number; code: string; message: string }
 
 const encoder = new TextEncoder()
 const SKEW_MS = 15 * 60 * 1000
@@ -214,7 +214,7 @@ export async function verifySignature(env: Env, req: Request): Promise<SigResult
     ].join('\n')
     const expected = hex(await hmac(signingKey, stringToSign))
     if (timingSafeEqualHex(expected, signature.toLowerCase())) {
-      return { ok: true }
+      return { ok: true, region: scopeRegion }
     }
   }
 
