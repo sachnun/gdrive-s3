@@ -170,6 +170,16 @@ describe('S3 e2e (aws4fetch as client)', () => {
     expect(xml2).toContain('<Key>k2.txt</Key>')
   })
 
+  it('lists an ETag that matches the object GET/HEAD ETag', async () => {
+    await s3(ctx, 'PUT', '/test-bucket', {})
+    await s3(ctx, 'PUT', '/test-bucket/e.txt', { body: 'etag' })
+    const listed = await (await s3(ctx, 'GET', '/test-bucket?list-type=2')).text()
+    const listEtag = /<ETag>&quot;([\s\S]*?)&quot;<\/ETag>/.exec(listed)?.[1]
+    const head = await s3(ctx, 'HEAD', '/test-bucket/e.txt')
+    expect(listEtag).toBeTruthy()
+    expect(head.headers.get('ETag')).toBe(`"${listEtag}"`)
+  })
+
   it('ListObjects V1 with marker continuation', async () => {
     await s3(ctx, 'PUT', '/test-bucket', {})
     for (let i = 0; i < 3; i++) {

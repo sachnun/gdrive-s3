@@ -182,7 +182,7 @@ export async function listObjects(env: Env, bucketFolderId: string | null, opts:
         contents.push({
           key: entryKey,
           lastModified: e.modifiedTime,
-          etag: `"${e.id}"`,
+          etag: e.id,
           size: Number(e.size ?? 0),
         })
         keyCount++
