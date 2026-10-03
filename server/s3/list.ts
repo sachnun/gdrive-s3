@@ -20,6 +20,7 @@ export interface ListOptions {
   startAfter?: string
   isV2: boolean
   encodingType?: string
+
   budget?: number
 }
 
@@ -49,6 +50,7 @@ interface Frame {
   dirKey: string
   pageToken?: string
   tail: string
+
   afterName: string
 }
 
@@ -139,8 +141,11 @@ export async function listObjects(env: Env, bucketFolderId: string | null, opts:
 
   let userSkip: string | null = null
   if (!opts.continuationToken) {
-    if (opts.marker && !opts.marker.startsWith(TOKEN_PREFIX)) userSkip = opts.marker
-    else if (opts.startAfter) userSkip = opts.startAfter
+    if (opts.isV2) {
+      if (opts.startAfter) userSkip = opts.startAfter
+    } else if (opts.marker && !opts.marker.startsWith(TOKEN_PREFIX)) {
+      userSkip = opts.marker
+    }
   }
 
   const contents: ListEntry[] = []
@@ -163,6 +168,7 @@ export async function listObjects(env: Env, bucketFolderId: string | null, opts:
 
   while (state.stack.length > 0 && keyCount < maxKeys) {
     const cur = state.stack[state.stack.length - 1]
+
     if (calls >= budget) {
       isTruncated = true
       break

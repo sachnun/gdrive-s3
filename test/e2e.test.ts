@@ -54,6 +54,7 @@ describe('S3 e2e (aws4fetch as client)', () => {
 
     expect((await s3(ctx, 'DELETE', '/test-bucket/dir/a.txt')).status).toBe(204)
     expect((await s3(ctx, 'GET', '/test-bucket/dir/a.txt')).status).toBe(404)
+
     expect((await s3(ctx, 'DELETE', '/test-bucket/dir/a.txt')).status).toBe(204)
   })
 
@@ -315,6 +316,23 @@ describe('S3 e2e (aws4fetch as client)', () => {
     expect(xml).not.toContain('<Key>s0.txt</Key>')
   })
 
+  it('ListObjects V2 ignores start-after once a continuation token is present', async () => {
+    await s3(ctx, 'PUT', '/test-bucket', {})
+    for (let i = 0; i < 3; i++) {
+      await s3(ctx, 'PUT', `/test-bucket/t${i}.txt`, { body: String(i) })
+    }
+    const page1 = await (await s3(ctx, 'GET', '/test-bucket?list-type=2&max-keys=1&start-after=t0.txt')).text()
+    const token = xmlTag(page1, 'NextContinuationToken')
+    expect(token).toBeTruthy()
+    expect(page1).toContain('<Key>t1.txt</Key>')
+
+    const page2 = await (
+      await s3(ctx, 'GET', `/test-bucket?list-type=2&start-after=t0.txt&continuation-token=${encodeURIComponent(token!)}`)
+    ).text()
+    expect(page2).toContain('<Key>t2.txt</Key>')
+    expect(page2).not.toContain('<Key>t1.txt</Key>')
+  })
+
   it('CopyObject within the same bucket', async () => {
     await s3(ctx, 'PUT', '/test-bucket', {})
     await s3(ctx, 'PUT', '/test-bucket/src.txt', { body: 'copy me' })
@@ -378,6 +396,7 @@ describe('S3 e2e (aws4fetch as client)', () => {
     const lb = await s3(ctx, 'GET', '/')
     const xml = await lb.text()
     expect(xml).toContain('<Name>anything-goes</Name>')
+
     expect(xml).not.toContain('.gdrive-s3-multipart')
   })
 
@@ -451,6 +470,7 @@ describe('S3 e2e (aws4fetch as client)', () => {
   it('dot-dot segments never escape into another bucket', async () => {
     await s3(ctx, 'PUT', '/test-bucket', {})
     await s3(ctx, 'PUT', '/test-bucket/keep.txt', { body: 'keep' })
+
     await s3(ctx, 'PUT', '/test-bucket/%2E%2E/escape', { body: 'x' })
     expect((await s3(ctx, 'GET', '/test-bucket/escape')).status).toBe(404)
     expect(await (await s3(ctx, 'GET', '/test-bucket/keep.txt')).text()).toBe('keep')
