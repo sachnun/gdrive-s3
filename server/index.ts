@@ -116,6 +116,7 @@ async function dispatch(
   }
   if (sub.kind === 'rename' && method === 'PUT') return objects.handleRenameObject(env, req, bucket, key)
   if (sub.kind === 'restore' && method === 'POST') return objects.handleRestoreObject(env, bucket, key)
+  if (sub.kind === 'select' && method === 'POST') return objects.handleSelectObjectContent(env, req, bucket, key)
   if (sub.kind === 'unknown') {
     return notImplemented(rawPath, `${sub.name} is not supported by this gateway`)
   }

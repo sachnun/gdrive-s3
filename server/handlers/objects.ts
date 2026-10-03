@@ -2,7 +2,9 @@ import type { Env } from '../env'
 import { DriveError } from '../drive/errors'
 import { findCachedFolder, resolveExistingPath, resolvePathCreate, getOrCreateFolder } from '../drive/folder'
 import { copyFile, downloadFile, findFilesInFolder, patchAppProperties, trashFile, uploadFile } from '../drive/files'
+import { contEvent, endEvent, eventStreamResponse, recordsEvent, statsEvent } from '../s3/eventstream'
 import { bufferIfSmall, extractXmlTags, uploadBody } from '../s3/request'
+import { parseSelectRequest, runSelect } from '../s3/select'
 import * as xml from '../s3/xml'
 import { requestId, toHttpDate } from '../util'
 
@@ -244,4 +246,24 @@ export async function handleRestoreObject(env: Env, bucket: string, key: string)
   const file = await findObject(env, bucket, key)
   if (!file) return xml.s3Error(404, 'NoSuchKey', 'The specified key does not exist.', `/${bucket}/${key}`, requestId())
   return new Response(null, { status: 200, headers: { 'x-amz-request-id': requestId() } })
+}
+
+export async function handleSelectObjectContent(env: Env, req: Request, bucket: string, key: string): Promise<Response> {
+  const file = await findObject(env, bucket, key)
+  if (!file) return xml.s3Error(404, 'NoSuchKey', 'The specified key does not exist.', `/${bucket}/${key}`, requestId())
+  const selectReq = parseSelectRequest(await req.text())
+  if (!selectReq) {
+    return xml.s3Error(400, 'InvalidRequestParameter', 'The SQL expression is invalid or unsupported.', `/${bucket}/${key}`, requestId())
+  }
+  const download = await downloadFile(env, file.id, null)
+  if (download.status !== 200) {
+    return xml.s3Error(502, 'InternalError', `Drive download failed (HTTP ${download.status})`, `/${bucket}/${key}`, requestId())
+  }
+  const data = new Uint8Array(await download.arrayBuffer())
+  const result = runSelect(data, selectReq)
+  const chunks: Uint8Array[] = []
+  if (result.payload.length > 0) chunks.push(recordsEvent(result.payload))
+  chunks.push(statsEvent(result.bytesScanned, result.bytesProcessed, result.bytesReturned))
+  chunks.push(endEvent())
+  return eventStreamResponse(chunks)
 }

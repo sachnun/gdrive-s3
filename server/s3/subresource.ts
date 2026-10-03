@@ -33,6 +33,7 @@ type SubResource =
   | { kind: 'policyStatus' }
   | { kind: 'metadataTable' }
   | { kind: 'restore' }
+  | { kind: 'select' }
   | { kind: 'listConfig'; name: string }
   | { kind: 'unknown'; name: string }
 
@@ -92,6 +93,8 @@ const KNOWN = new Set([
   'annotation',
   'torrent',
   'session',
+  'select',
+  'select-type',
 ])
 
 /** Bucket-level sub-resource carried in the query string. */
@@ -143,6 +146,7 @@ export function objectSubResource(params: URLSearchParams): SubResource {
   if (params.has('retention')) return { kind: 'retention' }
   if (params.has('renameObject')) return { kind: 'rename' }
   if (params.has('restore')) return { kind: 'restore' }
+  if (params.has('select')) return { kind: 'select' }
   return { kind: 'none' }
 }
 

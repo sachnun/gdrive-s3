@@ -674,3 +674,59 @@ describe('DeleteObjects beyond the subrequest limit', () => {
     }
   })
 })
+
+describe('SelectObjectContent', () => {
+  let ctx: TestSetup
+
+  beforeEach(async () => {
+    ctx = await setupTest()
+    await s3(ctx, 'PUT', '/test-bucket')
+    await s3(ctx, 'PUT', '/test-bucket/data.csv', {
+      body: 'name,age\nalice,30\nbob,20\ncarol,40\n',
+      headers: { 'Content-Type': 'text/csv' },
+    })
+  })
+  afterEach(() => ctx.restore())
+
+  const selectBody = (expr: string) =>
+    `<SelectObjectContentRequest><Expression>${expr}</Expression><ExpressionType>SQL</ExpressionType>` +
+    '<InputSerialization><CSV><FileHeaderInfo>USE</FileHeaderInfo></CSV></InputSerialization>' +
+    '<OutputSerialization><CSV/></OutputSerialization></SelectObjectContentRequest>'
+
+  it('streams Records then Stats then End over the event stream', async () => {
+    const res = await s3(ctx, 'POST', '/test-bucket/data.csv?select&select-type=2', { body: selectBody('SELECT * FROM S3Object') })
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toBe('application/vnd.amazon.eventstream')
+
+    const buf = new Uint8Array(await res.arrayBuffer())
+    const text = new TextDecoder().decode(buf)
+    const events = [...text.matchAll(/:event-type[\s\S]{0,4}?(Records|Stats|Progress|Cont|End)/g)].map((m) => m[1])
+    expect(events).toContain('Records')
+    expect(events).toContain('Stats')
+    expect(events[events.length - 1]).toBe('End')
+    expect(text).toContain('alice,30')
+    expect(text).toContain('<BytesScanned>')
+  })
+
+  it('applies WHERE and LIMIT', async () => {
+    const res = await s3(ctx, 'POST', '/test-bucket/data.csv?select', {
+      body: selectBody('SELECT * FROM S3Object WHERE age > 25 LIMIT 1'),
+    })
+    const text = new TextDecoder().decode(new Uint8Array(await res.arrayBuffer()))
+    expect(text).toContain('alice,30')
+    expect(text).not.toContain('bob,20')
+    expect(text).not.toContain('carol,40')
+  })
+
+  it('returns NoSuchKey for a missing object', async () => {
+    const res = await s3(ctx, 'POST', '/test-bucket/nope.csv?select', { body: selectBody('SELECT * FROM S3Object') })
+    expect(res.status).toBe(404)
+    expect(await res.text()).toContain('NoSuchKey')
+  })
+
+  it('rejects an unsupported expression', async () => {
+    const res = await s3(ctx, 'POST', '/test-bucket/data.csv?select', { body: '<SelectObjectContentRequest><ExpressionType>Pig</ExpressionType></SelectObjectContentRequest>' })
+    expect(res.status).toBe(400)
+    expect(await res.text()).toContain('InvalidRequestParameter')
+  })
+})
