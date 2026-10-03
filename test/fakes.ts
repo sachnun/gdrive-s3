@@ -308,6 +308,34 @@ export function makeFetchStub(drive: FakeDrive, opts: StubOptions = {}): FetchSt
       return new Response(JSON.stringify(toFile(copy)), { status: 200, headers: { 'Content-Type': 'application/json' } })
     }
 
+    if (method === 'POST' && path === '/batch/drive/v3') {
+      const raw = new TextDecoder().decode(await readBody(body))
+      const ids = [...raw.matchAll(/PATCH \/drive\/v3\/files\/([^ \r\n]+) HTTP\/1\.1/g)].map((m) => decodeURIComponent(m[1]))
+      const parts: string[] = []
+      ids.forEach((id, i) => {
+        const f = drive.files.get(id)
+        const status = !f ? 404 : 200
+        if (f && /"trashed"\s*:\s*true/.test(raw)) f.trashed = true
+        parts.push(
+          [
+            '',
+            `--batch_fake_${i}`,
+            'Content-Type: application/http',
+            `Content-ID: <response-item-${i}>`,
+            '',
+            `HTTP/1.1 ${status} OK`,
+            'Content-Type: application/json',
+            '',
+            JSON.stringify({ id, trashed: true }),
+          ].join('\r\n'),
+        )
+      })
+      return new Response(`${parts.join('')}\r\n--batch_fake_end--\r\n`, {
+        status: 200,
+        headers: { 'Content-Type': 'multipart/mixed; boundary=batch_fake_end' },
+      })
+    }
+
     if (method === 'PATCH' && /^\/drive\/v3\/files\/[^/]+$/.test(path)) {
       const fileId = path.split('/')[4]
       const f = drive.files.get(fileId)

@@ -3,7 +3,7 @@ import { BUCKETS } from '../config'
 import { DRIVE_API, driveFetch } from '../drive/auth'
 import { DriveError } from '../drive/errors'
 import { FOLDER_MIME, findCachedFolder, folderCacheKey, getOrCreateFolder, resolveExistingPath } from '../drive/folder'
-import { findFilesInFolder, trashFile } from '../drive/files'
+import { findFilesInFolder, trashFile, trashFiles } from '../drive/files'
 import { MULTIPART_ROOT } from '../drive/multipart'
 import { extractXmlKeys } from '../s3/request'
 import { listObjects, type ListOptions } from '../s3/list'
@@ -94,21 +94,28 @@ export async function handleDeleteObjects(env: Env, req: Request, bucket: string
   const keys = extractXmlKeys(body)
   let bucketFolderId: string | null = null
   if (keys.length > 0) bucketFolderId = await findCachedFolder(env, bucket, null).catch(() => null)
-  const results = await mapLimit(keys, DELETE_OBJECTS_CONCURRENCY, async (k): Promise<boolean> => {
+  const resolved = await mapLimit(keys, DELETE_OBJECTS_CONCURRENCY, async (k): Promise<string | null> => {
     try {
       const target = bucketFolderId ? await resolveExistingPath(env, bucketFolderId, k) : null
-      const file = target ? (await findFilesInFolder(env, target.name, target.parentId))[0] : undefined
-      if (file) await trashFile(env, file.id)
-      return true
+      if (!target) return null
+      const file = (await findFilesInFolder(env, target.name, target.parentId))[0]
+      return file?.id ?? null
     } catch {
-      return false
+      return null
     }
   })
+  const ids = resolved.filter((id): id is string => id !== null)
+  const failed = ids.length > 0 ? await trashFiles(env, ids) : new Map<string, string | null>()
   const deleted: string[] = []
   const errors: { key: string; code: string; message: string }[] = []
-  results.forEach((ok, i) => {
-    if (ok) deleted.push(keys[i])
-    else errors.push({ key: keys[i], code: 'InternalError', message: 'failed to delete object' })
+  resolved.forEach((id, i) => {
+    if (!id) {
+      deleted.push(keys[i])
+      return
+    }
+    const err = failed.get(id)
+    if (err) errors.push({ key: keys[i], code: 'InternalError', message: `failed to delete object (${err})` })
+    else deleted.push(keys[i])
   })
   return xml.deleteResultXml(deleted, errors)
 }

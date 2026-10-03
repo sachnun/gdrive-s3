@@ -625,3 +625,52 @@ describe('encoding-type=url', () => {
     expect(decodeURIComponent(encoded!)).toBe('Spaced Name/Ünïcode & symbols.txt')
   })
 })
+
+describe('DeleteObjects beyond the subrequest limit', () => {
+  let ctx: TestSetup
+
+  beforeEach(async () => {
+    ctx = await setupTest()
+  })
+  afterEach(() => ctx.restore())
+
+  it('deletes far more keys than the 50-subrequest cap allows', async () => {
+    await s3(ctx, 'PUT', '/test-bucket', {})
+    const total = 120
+    for (let i = 0; i < total; i++) {
+      await s3(ctx, 'PUT', `/test-bucket/dir/f${String(i).padStart(3, '0')}.txt`, { body: 'x' })
+    }
+
+    const before = ctx.stub.calls.length
+    const body = `<Delete>${Array.from({ length: total }, (_, i) => `<Object><Key>dir/f${String(i).padStart(3, '0')}.txt</Key></Object>`).join('')}</Delete>`
+    const xml = await (await s3(ctx, 'POST', '/test-bucket?delete', { body })).text()
+
+    const deleted = [...xml.matchAll(/<Deleted>/g)].length
+    const errors = [...xml.matchAll(/<Error>/g)].length
+    expect(deleted).toBe(total)
+    expect(errors).toBe(0)
+
+    const calls = ctx.stub.calls.slice(before)
+    const batches = calls.filter((c) => c.startsWith('/batch/drive/v3'))
+    expect(batches.length).toBeGreaterThan(0)
+    expect(batches.length).toBeLessThan(total)
+    expect(calls.filter((c) => c.includes('/drive/v3/files/')).length).toBe(0)
+  })
+
+  it('reports an error when the batch trash fails', async () => {
+    await s3(ctx, 'PUT', '/test-bucket', {})
+    await s3(ctx, 'PUT', '/test-bucket/dir/a.txt', { body: 'x' })
+    const original = globalThis.fetch
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes('/batch/drive/v3')) return new Response('boom', { status: 500 })
+      return original(input as RequestInfo, init)
+    }) as typeof fetch
+    try {
+      const xml = await (await s3(ctx, 'POST', '/test-bucket?delete', { body: '<Delete><Object><Key>dir/a.txt</Key></Object></Delete>' })).text()
+      expect(xml).toContain('<Error>')
+      expect(xml).toContain('dir/a.txt')
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+})

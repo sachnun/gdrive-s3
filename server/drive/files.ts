@@ -154,3 +154,49 @@ export async function copyFile(env: Env, srcId: string, name: string, parentId: 
   if (!res.ok) throw new DriveError(500, 'InternalError', `copy failed (HTTP ${res.status})`)
   return (await res.json()) as FileMeta
 }
+
+const BATCH_URL = 'https://www.googleapis.com/batch/drive/v3'
+const BATCH_SIZE = 20
+
+function buildBatch(ids: string[]): { body: string; boundary: string } {
+  const boundary = `gdrive_s3_batch_${randomHex(8)}`
+  const parts = ids.map((id, i) =>
+    [
+      `--${boundary}`,
+      'Content-Type: application/http',
+      `Content-ID: <item-${i}>`,
+      '',
+      `PATCH /drive/v3/files/${encodeURIComponent(id)} HTTP/1.1`,
+      'Content-Type: application/json',
+      '',
+      JSON.stringify({ trashed: true }),
+      '',
+    ].join('\r\n'),
+  )
+  return { body: `${parts.join('')}--${boundary}--\r\n`, boundary }
+}
+
+export async function trashFiles(env: Env, ids: string[]): Promise<Map<string, string | null>> {
+  const failed = new Map<string, string | null>()
+  for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+    const chunk = ids.slice(i, i + BATCH_SIZE)
+    const { body, boundary } = buildBatch(chunk)
+    const res = await driveFetch(env, BATCH_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': `multipart/mixed; boundary=${boundary}` },
+      body,
+    })
+    if (!res.ok) {
+      for (const id of chunk) failed.set(id, `batch failed (HTTP ${res.status})`)
+      continue
+    }
+    const text = await res.text()
+    const statuses = [...text.matchAll(/HTTP\/1\.1 (\d{3})/g)].map((m) => Number(m[1]))
+    chunk.forEach((id, idx) => {
+      const status = statuses[idx]
+      if (status === undefined) failed.set(id, 'no batch response')
+      else if (status >= 400 && status !== 404) failed.set(id, `HTTP ${status}`)
+    })
+  }
+  return failed
+}
