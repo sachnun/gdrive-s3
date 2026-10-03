@@ -29,10 +29,6 @@ async function getState(env: Env, uploadId: string): Promise<MultipartState> {
   return JSON.parse(raw) as MultipartState
 }
 
-/**
- * Creates a multipart upload session: a temp folder `.gdrive-s3-multipart/<bucket>/<uploadId>`
- * at the Drive root (outside any bucket, so it never shows up in listings).
- */
 export async function createMultipart(
   env: Env,
   args: { bucket: string; key: string; parentId: string; name: string; contentType: string },
@@ -55,7 +51,6 @@ export async function createMultipart(
   return { uploadId }
 }
 
-/** Uploads one part into the session's temp folder (part number kept in appProperties). */
 export async function uploadPart(
   env: Env,
   uploadId: string,
@@ -81,14 +76,12 @@ export async function uploadPart(
     appProperties: { partNumber: n, uploadId },
     data,
   })
-  // ETag = Drive file id, matching PutObject/HeadObject so clients can compare them.
   const etag = meta.id
   state.parts[n] = { fileId: meta.id, size: meta.size ? Number(meta.size) : (size ?? 0), etag }
   await env.FOLDER_CACHE.put(stateKey(uploadId), JSON.stringify(state))
   return { etag }
 }
 
-/** Re-syncs the part list from the temp folder so KV loss/races cannot lose parts. */
 async function reconcileParts(env: Env, state: MultipartState): Promise<void> {
   let pageToken: string | undefined
   for (let page = 0; page < 10; page++) {
@@ -110,18 +103,12 @@ async function reconcileParts(env: Env, state: MultipartState): Promise<void> {
   }
 }
 
-/**
- * Concatenates part files (streamed sequentially into one resumable session at the
- * final key), applies overwrite semantics, then trashes the temp folder.
- */
 export async function completeMultipart(
   env: Env,
   uploadId: string,
   requested: { partNumber: number; etag: string }[],
 ): Promise<{ etag: string }> {
   const state = await getState(env, uploadId)
-  // Re-sync from Drive only when the KV state cannot answer by itself: when the
-  // client listed parts that are unknown to us, or sent no part list at all.
   const needsReconcile =
     requested.length === 0 || !requested.every((r) => state.parts[String(r.partNumber)])
   if (needsReconcile) await reconcileParts(env, state)
@@ -151,13 +138,10 @@ export async function completeMultipart(
   if (ordered.length === 0) {
     finalMeta = await uploadToSession(env, location, null, 0, state.contentType)
   } else {
-    // One PUT for the whole object: Drive rejects intermediate chunks smaller
-    // than 256 KiB, so per-part chunked PUTs break for any normal part size.
     finalMeta = await uploadToSession(env, location, concatParts(env, ordered), totalSize, state.contentType)
   }
   if (!finalMeta) throw new DriveError(500, 'InternalError', 'multipart concat did not produce a file')
 
-  // Overwrite semantics: trash older files with the same name in the target folder.
   const siblings = await findFilesInFolder(env, state.name, state.parentId)
   for (const s of siblings) {
     if (s.id !== finalMeta.id) await trashFile(env, s.id)
@@ -168,11 +152,6 @@ export async function completeMultipart(
   return { etag: finalMeta.id }
 }
 
-/**
- * Lazily streams the parts back-to-back so a multipart object is uploaded in a
- * single resumable PUT. Parts are fetched one at a time, so memory stays flat
- * regardless of the total object size.
- */
 function concatParts(env: Env, parts: { partNumber: number; fileId: string; size: number }[]): ReadableStream<Uint8Array> {
   let index = 0
   let reader: ReadableStreamDefaultReader<Uint8Array> | null = null
@@ -213,10 +192,6 @@ export async function abortMultipart(env: Env, uploadId: string): Promise<void> 
   await env.FOLDER_CACHE.delete(stateKey(uploadId)).catch(() => {})
 }
 
-/**
- * Lazily trashes abandoned multipart temp folders older than 24h. Called on
- * CreateMultipartUpload; also Drive expires abandoned resumable sessions (~7 days).
- */
 export async function gcMultipart(env: Env, bucket: string): Promise<void> {
   try {
     const mpRoot = await findCachedFolder(env, MULTIPART_ROOT, null)
@@ -245,6 +220,5 @@ export async function gcMultipart(env: Env, bucket: string): Promise<void> {
       if (!pageToken) break
     }
   } catch {
-    // best-effort cleanup; never fail the request because of GC
   }
 }

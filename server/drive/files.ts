@@ -24,7 +24,6 @@ export async function getFileMeta(env: Env, id: string): Promise<FileMeta> {
   return (await res.json()) as FileMeta
 }
 
-/** Initializes a resumable upload session, returning the session Location URL. */
 export async function createResumableSession(
   env: Env,
   metadata: { name: string; parents: string[]; mimeType?: string; appProperties?: Record<string, string> },
@@ -47,7 +46,6 @@ export async function createResumableSession(
   return location
 }
 
-/** Streams a body into a resumable session. Returns file metadata on completion. */
 export async function uploadToSession(
   env: Env,
   location: string,
@@ -68,13 +66,6 @@ export async function uploadToSession(
   throw new DriveError(500, 'InternalError', `resumable upload failed (HTTP ${res.status})`)
 }
 
-/**
- * Uploads a file to Drive.
- *
- * With `data` (fully-buffered body, caller-checked ≤4 MiB): single-shot
- * `uploadType=multipart` — one Drive round trip instead of the two that a
- * resumable session costs. Otherwise: streaming resumable upload.
- */
 export async function uploadFile(
   env: Env,
   args: {
@@ -97,7 +88,6 @@ export async function uploadFile(
   return uploadToSession(env, location, body, size, contentType)
 }
 
-/** One-request upload (metadata + content as multipart/related); ≤5 MiB only. */
 async function uploadSingleShot(
   env: Env,
   args: { parentId: string; name: string; contentType?: string; appProperties?: Record<string, string> },
@@ -129,17 +119,12 @@ async function uploadSingleShot(
   return (await res.json()) as FileMeta
 }
 
-/** Streams file content; optionally forwards a Range header (Drive supports it). */
 export async function downloadFile(env: Env, id: string, range?: string | null): Promise<Response> {
   const headers: Record<string, string> = {}
   if (range) headers['Range'] = range
   return driveFetch(env, `${DRIVE_API}/drive/v3/files/${id}?alt=media&supportsAllDrives=true`, { headers })
 }
 
-/**
- * Finds files by exact name in a folder (newest created first, folders excluded).
- * Drive allows duplicate names, so callers pick the first (newest) result.
- */
 export async function findFilesInFolder(env: Env, name: string, parentId: string): Promise<FileMeta[]> {
   const q = `name='${escQuery(name)}' and '${parentId}' in parents and trashed=false and mimeType!='${FOLDER_MIME}'`
   const url = `${DRIVE_API}/drive/v3/files?q=${encodeURIComponent(q)}&pageSize=1000&fields=files(${FILE_FIELDS})&orderBy=createdTime desc&spaces=drive`
@@ -149,7 +134,6 @@ export async function findFilesInFolder(env: Env, name: string, parentId: string
   return data.files ?? []
 }
 
-/** Moves a file/folder to the Drive trash (safe delete; no permanent removal). */
 export async function trashFile(env: Env, id: string): Promise<void> {
   const res = await driveFetch(env, `${DRIVE_API}/drive/v3/files/${id}`, {
     method: 'PATCH',

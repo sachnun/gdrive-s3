@@ -16,7 +16,6 @@ export async function handleCreateMultipart(
   const { parentId, name } = await resolvePathCreate(env, bucketFolderId, key)
   const contentType = req.headers.get('content-type') ?? 'application/octet-stream'
   const { uploadId } = await createMultipart(env, { bucket, key, parentId, name, contentType })
-  // Best-effort cleanup of abandoned sessions — never block the response on it.
   waitUntil(gcMultipart(env, bucket))
   return xml.initiateMultipartXml(bucket, key, uploadId)
 }

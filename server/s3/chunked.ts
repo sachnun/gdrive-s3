@@ -1,11 +1,5 @@
 const textDecoder = new TextDecoder()
 
-/**
- * True when the request body uses aws-chunked application framing
- * (STREAMING-UNSIGNED-PAYLOAD-TRAILER, used by aws-sdk v3 / aws cli stream
- * uploads with checksums). HTTP-level chunked transfer is always decoded by the
- * runtime; aws-chunked is an application-layer encoding we must unwrap ourselves.
- */
 export function isAwsChunked(req: Request): boolean {
   const enc = (req.headers.get('content-encoding') ?? '').toLowerCase()
   return enc.includes('aws-chunked') || req.headers.get('x-amz-content-sha256') === 'STREAMING-UNSIGNED-PAYLOAD-TRAILER'
@@ -25,12 +19,6 @@ function indexOfCrLf(buf: Uint8Array): number {
   return -1
 }
 
-/**
- * Unwraps aws-chunked framing:
- *   <hex-size>\r\n<data>\r\n ... 0\r\n<trailer-headers>\r\n\r\n
- * Chunk signatures (STREAMING-AWS4-HMAC-SHA256-PAYLOAD) are not handled here —
- * those requests are rejected earlier during signature verification.
- */
 export function decodeAwsChunked(body: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
   const reader = body.getReader()
   let buffer: Uint8Array = new Uint8Array(0)
@@ -55,7 +43,6 @@ export function decodeAwsChunked(body: ReadableStream<Uint8Array>): ReadableStre
           const line = textDecoder.decode(buffer.subarray(0, crlf)).trim()
           buffer = buffer.subarray(crlf + 2)
           if (line === '0' || line.startsWith('0;')) {
-            // final chunk; the remaining bytes are trailer headers, discard them
             finished = true
             break
           }
@@ -70,7 +57,7 @@ export function decodeAwsChunked(body: ReadableStream<Uint8Array>): ReadableStre
           continue
         }
         const chunk = buffer.subarray(0, chunkRemaining)
-        buffer = buffer.subarray(chunkRemaining + 2) // skip trailing CRLF
+        buffer = buffer.subarray(chunkRemaining + 2)
         chunkRemaining = 0
         controller.enqueue(chunk)
         return

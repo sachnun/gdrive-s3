@@ -3,12 +3,6 @@ import { listObjects } from '../server/s3/list'
 import { getOrCreateFolder } from '../server/drive/folder'
 import { FakeDrive, makeEnv, makeFetchStub, type FetchStub } from './fakes'
 
-/**
- * A recursive listing costs one Drive call per folder, and Cloudflare Workers
- * cap subrequests per invocation (50 on the free plan). The walk must therefore
- * stop on its own budget and hand back a resumable continuation token rather
- * than letting the platform abort the whole request.
- */
 describe('listObjects Drive-call budget', () => {
   let drive: FakeDrive
   let stub: FetchStub

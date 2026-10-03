@@ -1,12 +1,7 @@
 import { decodeAwsChunked, isAwsChunked } from './chunked'
 
-/** Bodies at or below this size (and of known length) upload in one Drive request. */
 export const SMALL_UPLOAD_MAX = 4 * 1024 * 1024
 
-/**
- * Parses a path-style request: /<bucket>/<key...>. Returns bucket=null for the
- * root path (ListBuckets). Rejects ".." segments.
- */
 export function parseRequest(rawPath: string): { bucket: string | null; key: string | null } {
   const rawSegs = rawPath.split('/').filter((s) => s.length > 0)
   if (rawSegs.length === 0) return { bucket: null, key: null }
@@ -37,10 +32,6 @@ function parseLength(h: string | null): number | undefined {
   return isNaN(n) || n < 0 ? undefined : n
 }
 
-/**
- * Returns the upload body and its size, decoding aws-chunked framing when the
- * client used STREAMING-UNSIGNED-PAYLOAD-TRAILER (aws-sdk v3 stream uploads).
- */
 export function uploadBody(req: Request): { body: BodyInit | null; size: number | undefined } {
   if (isAwsChunked(req)) {
     const size = parseLength(req.headers.get('x-amz-decoded-content-length'))
@@ -50,7 +41,6 @@ export function uploadBody(req: Request): { body: BodyInit | null; size: number 
   return { body: req.body, size: parseLength(req.headers.get('content-length')) }
 }
 
-/** Buffers a known-size body ≤ SMALL_UPLOAD_MAX so it can go in one request. */
 export async function bufferIfSmall(
   body: BodyInit | null,
   size?: number,

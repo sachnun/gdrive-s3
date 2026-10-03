@@ -86,7 +86,7 @@ describe('AWS SigV4 verification', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2024-01-01T00:00:00Z'))
     const signed = await makeAws().sign('http://localhost/test-bucket/hello.txt', { method: 'GET', aws: { signQuery: true } })
-    vi.setSystemTime(new Date('2024-01-02T02:00:00Z')) // > 24h + 15min skew
+    vi.setSystemTime(new Date('2024-01-02T02:00:00Z'))
     const res = await verifySignature(makeEnv(), signed)
     expect(res.ok).toBe(false)
     if (!res.ok) expect(res.code).toBe('AccessDenied')

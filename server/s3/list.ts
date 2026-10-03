@@ -20,7 +20,6 @@ export interface ListOptions {
   startAfter?: string
   isV2: boolean
   encodingType?: string
-  /** Override the Drive-call budget (tests); defaults to DRIVE_CALL_BUDGET. */
   budget?: number
 }
 
@@ -35,12 +34,6 @@ export interface ListResult {
 
 const TOKEN_PREFIX = 'gds3:'
 
-/**
- * Drive calls one listing may spend. Cloudflare Workers cap subrequests per
- * invocation (50 on the free plan) and a recursive walk costs one call per
- * folder, so the walk stops early and hands the client a continuation token
- * instead of failing the whole request.
- */
 const DRIVE_CALL_BUDGET = 40
 
 interface DriveChild {
@@ -56,7 +49,6 @@ interface Frame {
   dirKey: string
   pageToken?: string
   tail: string
-  /** Plain name of the last entry handled in this dir; the resume cursor. */
   afterName: string
 }
 
@@ -106,10 +98,6 @@ async function listDrivePage(
   return { entries: data.files ?? [], nextPageToken: data.nextPageToken }
 }
 
-/**
- * Splits a prefix into the folder path to descend into and the remaining name
- * prefix to filter within that folder. Example: "a/b/c" → dir "a/b", tail "c".
- */
 async function resolvePrefixDir(
   env: Env,
   bucketFolderId: string,
@@ -126,11 +114,6 @@ async function resolvePrefixDir(
   return { dirId, dirKey: dirPath ? dirPath + '/' : '', tail }
 }
 
-/**
- * ListObjects (V1 + V2, shared engine) with prefix, delimiter, max-keys and
- * pagination. Drive pages (pageSize=1000) are walked; delimiter="/" aggregates
- * folders into CommonPrefixes, delimiter="" recurses into subfolders.
- */
 export async function listObjects(env: Env, bucketFolderId: string | null, opts: ListOptions): Promise<ListResult> {
   const { prefix, delimiter, maxKeys } = opts
   const budget = opts.budget ?? DRIVE_CALL_BUDGET
@@ -154,7 +137,6 @@ export async function listObjects(env: Env, bucketFolderId: string | null, opts:
     state = { stack: [{ dirId, dirKey, tail, afterName: '' }] }
   }
 
-  // A plain V1 marker / V2 start-after is a full key and applies to every directory.
   let userSkip: string | null = null
   if (!opts.continuationToken) {
     if (opts.marker && !opts.marker.startsWith(TOKEN_PREFIX)) userSkip = opts.marker
@@ -166,9 +148,6 @@ export async function listObjects(env: Env, bucketFolderId: string | null, opts:
   let isTruncated = false
   let keyCount = 0
 
-  // Descending keeps the parent on its current Drive page (its token must not
-  // advance past unread entries), so cache that page: the parent is revisited
-  // on the way back up and would otherwise refetch it for every subfolder.
   const pageCache = new Map<string, Promise<{ entries: DriveChild[]; nextPageToken?: string }>>()
   let calls = 0
   const fetchPage = (frame: Frame) => {
@@ -182,13 +161,8 @@ export async function listObjects(env: Env, bucketFolderId: string | null, opts:
     return hit
   }
 
-  // Depth-first walk driven by an explicit stack. The stack is the pagination
-  // cursor, so a token stays proportional to the folder depth, never to the
-  // number of sibling folders a directory happens to contain.
   while (state.stack.length > 0 && keyCount < maxKeys) {
     const cur = state.stack[state.stack.length - 1]
-    // Budget exhausted: stop before the platform kills the request and let the
-    // client resume from the cursor we have already advanced to.
     if (calls >= budget) {
       isTruncated = true
       break
@@ -199,12 +173,8 @@ export async function listObjects(env: Env, bucketFolderId: string | null, opts:
     if (cur.tail) entries = entries.filter((e) => e.name.startsWith(cur.tail))
     entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
 
-    // `afterName` is this frame's cursor: entries at or before it were already
-    // returned, so a resumed page replays them without emitting duplicates.
     if (cur.afterName) entries = entries.filter((e) => e.name > cur.afterName!)
 
-    // A page cut short by max-keys must not consume its Drive page token: that
-    // token only covers fully read pages, and `afterName` resumes inside it.
     let pageDone = true
     for (const e of entries) {
       if (keyCount >= maxKeys) {
@@ -223,9 +193,6 @@ export async function listObjects(env: Env, bucketFolderId: string | null, opts:
           keyCount++
         }
       } else if (isFolder) {
-        // Recursive mode: descend by pushing a frame. The parent frame keeps the
-        // page token it is on and only advances `afterName`, so the entries that
-        // follow this folder on the same page are still read on the way back up.
         state.stack.push({ dirId: e.id, dirKey: entryKey + '/', tail: '', afterName: '' })
         pageDone = false
         break
@@ -247,8 +214,8 @@ export async function listObjects(env: Env, bucketFolderId: string | null, opts:
       if (cur.pageToken || state.stack.length > 1) isTruncated = true
       break
     }
-    if (cur.pageToken) continue // more pages in the current dir
-    state.stack.pop() // directory exhausted; return to the parent frame
+    if (cur.pageToken) continue
+    state.stack.pop()
   }
 
   const result: ListResult = {

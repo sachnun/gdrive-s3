@@ -10,7 +10,6 @@ import { listObjects, type ListOptions } from '../s3/list'
 import * as xml from '../s3/xml'
 import { mapLimit, requestId } from '../util'
 
-/** Max parallel per-key deletions in DeleteObjects (Drive rate limit friendly). */
 const DELETE_OBJECTS_CONCURRENCY = 8
 
 export async function handleListBuckets(env: Env): Promise<Response> {
@@ -25,7 +24,6 @@ export async function handleListBuckets(env: Env): Promise<Response> {
     if (!res.ok) throw new DriveError(500, 'InternalError', `bucket list failed (HTTP ${res.status})`)
     const data = (await res.json()) as { nextPageToken?: string; files: { id: string; name: string; createdTime: string }[] }
     for (const f of data.files) {
-      // Internal multipart temp storage is never exposed as a bucket.
       if (f.name === MULTIPART_ROOT) continue
       if (allowed && !allowed.includes(f.name)) continue
       buckets.push({ name: f.name, creationDate: f.createdTime })
@@ -44,13 +42,9 @@ export async function handleHeadBucket(env: Env, bucket: string): Promise<Respon
 }
 
 export async function handleCreateBucket(env: Env, bucket: string): Promise<Response> {
-  // AWS S3 naming rules: 3-63 chars, lowercase letters/digits/dots/hyphens,
-  // must begin and end with a letter or digit.
-  // https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html
   if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket) || bucket.includes('..')) {
     return xml.s3Error(400, 'InvalidBucketName', 'The specified bucket is not valid.', `/${bucket}`, requestId())
   }
-  // us-east-1 legacy semantics: re-creating an owned bucket returns 200 OK.
   await getOrCreateFolder(env, bucket, null)
   return new Response(null, { status: 200, headers: { 'x-amz-request-id': requestId() } })
 }

@@ -100,7 +100,6 @@ export async function handleDeleteObject(env: Env, bucket: string, key: string):
   return new Response(null, { status: 204, headers: { 'x-amz-request-id': requestId() } })
 }
 
-/** Resolves a key to the newest file with that name (folders excluded). */
 async function findObject(
   env: Env,
   bucket: string,

@@ -145,16 +145,13 @@ export class FakeDrive {
 }
 
 export interface StubOptions {
-  /** Bearer tokens accepted by the fake Drive API (defaults to ['fake-token']). */
   validTokens?: string[]
-  /** Token returned by the oauth refresh endpoint (defaults to 'fake-token'). */
   refreshToken?: string
 }
 
 export interface FetchStub {
   (input: RequestInfo | URL, init?: RequestInit): Promise<Response>
   setValidTokens: (tokens: string[]) => void
-  /** Raw bodies of every POST sent to the oauth token endpoint. */
   oauthLog: string[]
 }
 
@@ -178,7 +175,6 @@ export function makeFetchStub(drive: FakeDrive, opts: StubOptions = {}): FetchSt
       const assertion = new URLSearchParams(bodyText).get('assertion')
       let token = state.refreshToken
       if (grant === 'urn:ietf:params:oauth:grant-type:jwt-bearer' && assertion) {
-        // Derive the token from the JWT issuer so tests can tell SAs apart.
         const payload = assertion.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')
         const padded = payload + '='.repeat((4 - (payload.length % 4)) % 4)
         const claims = JSON.parse(atob(padded)) as { iss?: string }
@@ -201,8 +197,6 @@ export function makeFetchStub(drive: FakeDrive, opts: StubOptions = {}): FetchSt
     const path = url.pathname
     if (path.startsWith('/upload/drive/v3/files')) {
       if (method === 'POST' && url.searchParams.get('uploadType') === 'multipart') {
-        // Single-shot upload: multipart/related with a JSON metadata part and a
-        // binary content part delimited by the request's boundary.
         const raw = await readBody(body)
         const ct = headers.get('content-type') ?? ''
         const boundary = /boundary=([^;\s]+)/.exec(ct)?.[1]

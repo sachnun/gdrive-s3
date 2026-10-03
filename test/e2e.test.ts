@@ -54,7 +54,6 @@ describe('S3 e2e (aws4fetch as client)', () => {
 
     expect((await s3(ctx, 'DELETE', '/test-bucket/dir/a.txt')).status).toBe(204)
     expect((await s3(ctx, 'GET', '/test-bucket/dir/a.txt')).status).toBe(404)
-    // S3-style idempotent delete
     expect((await s3(ctx, 'DELETE', '/test-bucket/dir/a.txt')).status).toBe(204)
   })
 
@@ -379,7 +378,6 @@ describe('S3 e2e (aws4fetch as client)', () => {
     const lb = await s3(ctx, 'GET', '/')
     const xml = await lb.text()
     expect(xml).toContain('<Name>anything-goes</Name>')
-    // internal multipart storage must never surface as a bucket
     expect(xml).not.toContain('.gdrive-s3-multipart')
   })
 
@@ -453,7 +451,6 @@ describe('S3 e2e (aws4fetch as client)', () => {
   it('dot-dot segments never escape into another bucket', async () => {
     await s3(ctx, 'PUT', '/test-bucket', {})
     await s3(ctx, 'PUT', '/test-bucket/keep.txt', { body: 'keep' })
-    // the URL parser collapses dot segments, so this creates the bucket "escape", never test-bucket/escape
     await s3(ctx, 'PUT', '/test-bucket/%2E%2E/escape', { body: 'x' })
     expect((await s3(ctx, 'GET', '/test-bucket/escape')).status).toBe(404)
     expect(await (await s3(ctx, 'GET', '/test-bucket/keep.txt')).text()).toBe('keep')
@@ -473,7 +470,6 @@ describe('S3 e2e (aws4fetch as client)', () => {
 })
 
 async function makeBadSignedPut(ctx: TestSetup): Promise<Response> {
-  // sign with wrong secret
   const badAws = new AwsClient({ accessKeyId: ACCESS_KEY, secretAccessKey: 'totally-wrong-secret', service: 's3', region: 'us-east-1' })
   const signed = await badAws.sign('http://localhost/test-bucket/foo.txt', { method: 'PUT', body: 'x' })
   signed.headers.set('host', 'localhost')

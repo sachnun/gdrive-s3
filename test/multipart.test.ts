@@ -58,10 +58,8 @@ describe('multipart upload', () => {
     const get = await s3(ctx, 'GET', '/test-bucket/big.bin')
     expect(await get.text()).toBe('AAAAABBBBBCCCCC')
 
-    // temp session folder is trashed
     const leftovers = ctx.drive.allFiles().filter((f) => f.name === uploadId && !f.trashed)
     expect(leftovers.length).toBe(0)
-    // exactly one final object, no duplicates
     const root = await bucketRootId(ctx, 'test-bucket')
     expect(ctx.drive.countUntrashed(root, 'big.bin')).toBe(1)
   })
@@ -99,7 +97,7 @@ describe('multipart upload', () => {
     const done = await s3(ctx, 'POST', `/test-bucket/invalid.bin?uploadId=${encodeURIComponent(uploadId)}`, {
       body: completeBody([
         { partNumber: 1, etag: etag1 },
-        { partNumber: 2, etag: etag1 }, // part 2 was never uploaded
+        { partNumber: 2, etag: etag1 },
       ]),
     })
     expect(done.status).toBe(400)

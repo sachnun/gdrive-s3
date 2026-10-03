@@ -15,11 +15,6 @@ export interface ServiceAccount {
   tokenUri: string
 }
 
-/**
- * Parses service-account config: either a JSON array, or a file containing
- * concatenated service-account JSON blobs (the rclone `service_account_file`
- * format, one pretty-printed object after another).
- */
 export function parseServiceAccounts(raw: string): ServiceAccount[] {
   const out: ServiceAccount[] = []
   const trimmed = raw.trim()
@@ -56,7 +51,6 @@ export function parseServiceAccounts(raw: string): ServiceAccount[] {
     try {
       push(JSON.parse(trimmed.slice(start, end + 1)) as Record<string, unknown>)
     } catch {
-      // skip malformed blob
     }
     i = end + 1
   }
@@ -87,7 +81,6 @@ function base64url(data: Uint8Array): string {
   return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
-/** Signs a JWT (RS256) with the service account's PKCS#8 private key. */
 async function signJwt(privateKeyPem: string, claims: Record<string, unknown>): Promise<string> {
   const derB64 = privateKeyPem
     .replace(/-----BEGIN PRIVATE KEY-----/, '')
@@ -102,7 +95,6 @@ async function signJwt(privateKeyPem: string, claims: Record<string, unknown>): 
   return `${input}.${base64url(sig)}`
 }
 
-/** Exchanges a signed JWT assertion for an OAuth access token (JWT bearer grant). */
 async function serviceAccountToken(env: Env, sa: ServiceAccount): Promise<{ token: string; expiresIn: number }> {
   const now = Math.floor(Date.now() / 1000)
   const assertion = await signJwt(sa.privateKey, {
@@ -124,15 +116,9 @@ async function serviceAccountToken(env: Env, sa: ServiceAccount): Promise<{ toke
   return { token: data.access_token, expiresIn: data.expires_in }
 }
 
-/** Parsed service accounts, memoized per source string (TTL'd). */
 const saCache = new Map<string, { at: number; list: ServiceAccount[] }>()
 let rrIndex = 0
 
-/**
- * Per-isolate access-token memo. Skips the AUTH_KV read on every driveFetch
- * (~10–50 ms each); TTL stays well under Google's ~1 h token lifetime, and the
- * 401 retry path clears it so a revoked token can never stick.
- */
 const MEM_TOKEN_TTL_MS = 10 * 60 * 1000
 const memTokens = new Map<string, { token: string; at: number }>()
 
@@ -150,15 +136,10 @@ function memoPutToken(key: string, token: string): void {
   memTokens.set(key, { token, at: Date.now() })
 }
 
-/** Drops all memoized access tokens (called when Drive rejects one with 401). */
 export function invalidateTokenCache(): void {
   memTokens.clear()
 }
 
-/**
- * Loads the service-account list from the env var, falling back to the AUTH_KV
- * key `service_accounts` (for payloads larger than the 5 KB secret limit).
- */
 async function loadServiceAccounts(env: Env): Promise<ServiceAccount[]> {
   const source =
     env.GOOGLE_SERVICE_ACCOUNTS?.trim() || (await env.AUTH_KV.get(SA_KV_KEY)) || ''
@@ -170,7 +151,6 @@ async function loadServiceAccounts(env: Env): Promise<ServiceAccount[]> {
   return list
 }
 
-/** Round-robins service accounts, caching each account's token in KV + memory. */
 async function getServiceAccountToken(env: Env): Promise<string> {
   const list = await loadServiceAccounts(env)
   if (list.length === 0) {
@@ -191,11 +171,6 @@ async function getServiceAccountToken(env: Env): Promise<string> {
   return token
 }
 
-/**
- * Returns a cached OAuth access token from KV, refreshing when absent/expired.
- * Uses service-account auth when GOOGLE_REFRESH_TOKEN is unset, else the OAuth
- * refresh-token flow (KV expirationTtl = expires_in - 60s).
- */
 export async function getAccessToken(env: Env): Promise<string> {
   if (!env.GOOGLE_REFRESH_TOKEN) return getServiceAccountToken(env)
   const memo = memoGetToken(TOKEN_KEY)
@@ -211,10 +186,6 @@ export async function getAccessToken(env: Env): Promise<string> {
   return token
 }
 
-/**
- * Drive API fetch wrapper: attaches the Bearer token, and on a 401 invalidates
- * the cached token and retries once with a freshly refreshed one.
- */
 export async function driveFetch(env: Env, url: string, init: RequestInit = {}, retried = false): Promise<Response> {
   const token = await getAccessToken(env)
   const headers = new Headers(init.headers)

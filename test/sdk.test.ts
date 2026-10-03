@@ -45,7 +45,6 @@ class S3RequestHandler {
   }
 
   updateHttpClientConfig(): void {
-    // no-op
   }
 
   httpHandlerConfigs(): Record<string, unknown> {
@@ -53,7 +52,6 @@ class S3RequestHandler {
   }
 
   destroy(): void {
-    // no-op
   }
 }
 

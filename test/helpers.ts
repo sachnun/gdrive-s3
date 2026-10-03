@@ -46,7 +46,6 @@ export async function setupTest(overrides: Partial<Env> = {}): Promise<TestSetup
   }
 }
 
-/** Sign with aws4fetch (header auth) and dispatch to the app. */
 export async function s3(
   ctx: TestCtx,
   method: string,
@@ -59,7 +58,6 @@ export async function s3(
   return ctx.app.fetch(signed)
 }
 
-/** Sign a presigned (query auth) URL and dispatch without Authorization. */
 export async function s3Presigned(
   ctx: TestCtx,
   method: string,

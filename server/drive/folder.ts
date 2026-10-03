@@ -15,7 +15,6 @@ export function folderCacheKey(parentId: string | null, name: string): string {
   return `folder:${parentId ?? ''}:${name}`
 }
 
-/** Searches Drive for an existing folder (no creation). Returns null if absent. */
 export async function findFolder(env: Env, name: string, parentId: string | null): Promise<string | null> {
   const parentExpr = parentId ? `'${parentId}' in parents` : "'root' in parents"
   const q = `name='${escQuery(name)}' and mimeType='${FOLDER_MIME}' and ${parentExpr} and trashed=false`
@@ -26,7 +25,6 @@ export async function findFolder(env: Env, name: string, parentId: string | null
   return data.files[0]?.id ?? null
 }
 
-/** Cached lookup (KV, 1h TTL): returns the Drive folder id or null if absent. */
 export async function findCachedFolder(env: Env, name: string, parentId: string | null): Promise<string | null> {
   const cacheKey = folderCacheKey(parentId, name)
   const cached = await env.FOLDER_CACHE.get(cacheKey)
@@ -36,11 +34,6 @@ export async function findCachedFolder(env: Env, name: string, parentId: string 
   return id
 }
 
-/**
- * Returns the existing folder id for (name, parent), creating it if missing.
- * Results are cached in KV (1h TTL); an advisory KV lock reduces duplicate-folder
- * races from concurrent creates.
- */
 export async function getOrCreateFolder(env: Env, name: string, parentId: string | null): Promise<string> {
   const cacheKey = folderCacheKey(parentId, name)
   const cached = await env.FOLDER_CACHE.get(cacheKey)
@@ -52,7 +45,6 @@ export async function getOrCreateFolder(env: Env, name: string, parentId: string
     return existing
   }
 
-  // Advisory lock: if another request is creating concurrently, wait briefly and re-check.
   const lockKey = `lock:${cacheKey}`
   const locked = await env.FOLDER_CACHE.get(lockKey)
   if (locked) {
@@ -84,10 +76,6 @@ export async function getOrCreateFolder(env: Env, name: string, parentId: string
   return data.id
 }
 
-/**
- * Resolves an object key to (parentFolderId, fileName) using only existing
- * folders. Returns null when any path segment does not exist.
- */
 export async function resolveExistingPath(
   env: Env,
   rootId: string,
@@ -104,10 +92,6 @@ export async function resolveExistingPath(
   return { parentId: current, name: segs[segs.length - 1] }
 }
 
-/**
- * Resolves a directory path to the id of the folder at the end of it (existing
- * folders only). Returns null when any segment does not exist.
- */
 export async function resolveExistingFolderId(env: Env, rootId: string, path: string): Promise<string | null> {
   const segs = path.split('/').filter((s) => s.length > 0)
   let current = rootId
@@ -119,9 +103,6 @@ export async function resolveExistingFolderId(env: Env, rootId: string, path: st
   return current
 }
 
-/**
- * Resolves an object key for upload, creating intermediate folders as needed.
- */
 export async function resolvePathCreate(
   env: Env,
   rootId: string,

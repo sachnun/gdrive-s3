@@ -17,7 +17,6 @@ export function requestId(): string {
   return randomHex(8)
 }
 
-/** Maps items through an async fn with bounded concurrency, preserving order. */
 export async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const out: R[] = new Array(items.length)
   let next = 0

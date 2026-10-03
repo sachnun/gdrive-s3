@@ -37,10 +37,6 @@ function parseAmzDate(s: string): number {
   return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6])
 }
 
-/**
- * Canonical query string from the RAW (already percent-encoded) query, sorted by
- * encoded name then encoded value. For presigned requests X-Amz-Signature is excluded.
- */
 function canonicalQueryString(rawQuery: string, exclude: Set<string>): string {
   if (!rawQuery) return ''
   const pairs: { k: string; v: string }[] = []
@@ -78,10 +74,6 @@ async function deriveSigningKey(secret: string, date: string, region: string): P
   return hmac(kService, 'aws4_request')
 }
 
-/**
- * Verifies AWS Signature V4 (header auth and presigned query auth).
- * Enforces presigned X-Amz-Expires and ±15 min date freshness (replay protection).
- */
 export async function verifySignature(env: Env, req: Request): Promise<SigResult> {
   const rawUrl = req.url
   const url = new URL(rawUrl)
@@ -91,9 +83,6 @@ export async function verifySignature(env: Env, req: Request): Promise<SigResult
   const headers = req.headers
   const method = req.method
 
-  // Detect aws-chunked signed payloads early (before auth parsing): signed-chunk
-  // mode is rejected (P2); unsigned-trailer mode is allowed and de-chunked in the
-  // upload path.
   const payloadHashHint =
     query.get('X-Amz-Content-Sha256') ??
     query.get('x-amz-content-sha256') ??
@@ -181,16 +170,8 @@ export async function verifySignature(env: Env, req: Request): Promise<SigResult
 
   const signingKey = await deriveSigningKey(env.SECRET_KEY, scopeDate, scopeRegion)
 
-  /**
-   * Edge/CDN proxies (e.g. Cloudflare) rewrite `Accept-Encoding` in flight
-   * (`identity` -> `gzip, br`), breaking clients that signed it (Go SDKs,
-   * rclone). The signature stays bound to the key, method, path, date and all
-   * other signed headers, so also accept the common rewrites of that one header.
-   */
   const variations: { list: string[]; overrides: Record<string, string> }[] = [{ list: signedList, overrides: {} }]
   if (signedList.includes('accept-encoding')) {
-    // Go SDK clients sign Accept-Encoding as `identity` (HEAD) or `gzip` (GET);
-    // Cloudflare rewrites both to `gzip, br` in flight. Cover the common rewrites.
     for (const v of ['identity', 'gzip', 'gzip, br', 'br, gzip', 'br', 'deflate', '']) {
       variations.push({ list: signedList, overrides: { 'accept-encoding': v } })
     }

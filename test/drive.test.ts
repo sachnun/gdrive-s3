@@ -10,7 +10,7 @@ describe('drive auth (KV-backed token)', () => {
   let restore: () => void
 
   beforeEach(() => {
-    invalidateTokenCache() // memo is module-level; reset so each test starts cold
+    invalidateTokenCache()
     drive = new FakeDrive()
     stub = makeFetchStub(drive)
     restore = globalThis.fetch as unknown as () => void
@@ -56,7 +56,7 @@ describe('drive auth with service accounts (JWT bearer)', () => {
   let restore: () => void
 
   beforeEach(() => {
-    invalidateTokenCache() // memo is module-level; reset so each test starts cold
+    invalidateTokenCache()
     drive = new FakeDrive()
     stub = makeFetchStub(drive)
     restore = globalThis.fetch as unknown as () => void
@@ -118,12 +118,10 @@ describe('drive auth with service accounts (JWT bearer)', () => {
     const tokens: string[] = []
     for (let i = 0; i < 4; i++) tokens.push(await getAccessToken(env))
 
-    // alternates between the two SAs; calls 3-4 are cache hits
     expect(tokens[0]).not.toBe(tokens[1])
     expect(tokens[2]).toBe(tokens[0])
     expect(tokens[3]).toBe(tokens[1])
     expect(new Set(tokens).size).toBe(2)
-    // only two oauth exchanges total (one per SA), the rest served from KV
     expect(stub.oauthLog.length).toBe(2)
     expect(decodeURIComponent(stub.oauthLog[0])).toContain('grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer')
   })
@@ -195,7 +193,6 @@ describe('drive folders (KV cache + lock)', () => {
     const existing = await resolveExistingPath(env, root, 'a/b/c.txt')
     expect(existing).toEqual(r)
     expect(await resolveExistingPath(env, root, 'a/nope/c.txt')).toBeNull()
-    // create mode created the folder chain in Drive
     const folders = drive.allFiles().filter((f) => f.mimeType === FOLDER_MIME && !f.trashed)
     expect(folders.some((f) => f.name === 'a')).toBe(true)
     expect(folders.some((f) => f.name === 'b')).toBe(true)

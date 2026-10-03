@@ -60,7 +60,6 @@ async function dispatch(
 ): Promise<Response> {
   const { bucket, key } = parseRequest(rawPath)
 
-  // Root path: ListBuckets. Always signed, like AWS (anonymous callers get AccessDenied).
   if (!bucket) {
     const sig = await verifyRequest(env, req)
     if (!sig.ok) return xml.s3Error(sig.status, sig.code, sig.message, rawPath, requestId())
