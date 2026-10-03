@@ -1,8 +1,8 @@
 import type { Env } from '../env'
 import { DriveError } from '../drive/errors'
 import { findCachedFolder, resolveExistingPath, resolvePathCreate, getOrCreateFolder } from '../drive/folder'
-import { copyFile, downloadFile, findFilesInFolder, trashFile, uploadFile } from '../drive/files'
-import { bufferIfSmall, uploadBody } from '../s3/request'
+import { copyFile, downloadFile, findFilesInFolder, patchAppProperties, trashFile, uploadFile } from '../drive/files'
+import { bufferIfSmall, extractXmlTags, uploadBody } from '../s3/request'
 import * as xml from '../s3/xml'
 import { requestId, toHttpDate } from '../util'
 
@@ -148,4 +148,42 @@ export async function handleGetObjectTagging(env: Env, bucket: string, key: stri
   const file = await findObject(env, bucket, key)
   if (!file) return xml.s3Error(404, 'NoSuchKey', 'The specified key does not exist.', `/${bucket}/${key}`, requestId())
   return xml.taggingXml(file.appProperties)
+}
+
+export async function handlePutObjectTagging(env: Env, req: Request, bucket: string, key: string): Promise<Response> {
+  const file = await findObject(env, bucket, key)
+  if (!file) return xml.s3Error(404, 'NoSuchKey', 'The specified key does not exist.', `/${bucket}/${key}`, requestId())
+  const tags = extractXmlTags(await req.text())
+  const existingTags = Object.keys(file.appProperties ?? {}).filter((k) => k.startsWith('x-amz-tag-'))
+  const props: Record<string, string> = {}
+  for (const [k, v] of Object.entries(file.appProperties ?? {})) {
+    if (!k.startsWith('x-amz-tag-')) props[k] = v
+  }
+  for (const { key: tk, value } of tags) props[`x-amz-tag-${tk}`] = value.slice(0, 120)
+  await patchAppProperties(env, file.id, props, existingTags)
+  return new Response(null, { status: 200, headers: { 'x-amz-request-id': requestId() } })
+}
+
+export async function handleDeleteObjectTagging(env: Env, bucket: string, key: string): Promise<Response> {
+  const file = await findObject(env, bucket, key)
+  if (!file) return xml.s3Error(404, 'NoSuchKey', 'The specified key does not exist.', `/${bucket}/${key}`, requestId())
+  const existingTags = Object.keys(file.appProperties ?? {}).filter((k) => k.startsWith('x-amz-tag-'))
+  const props: Record<string, string> = {}
+  for (const [k, v] of Object.entries(file.appProperties ?? {})) {
+    if (!k.startsWith('x-amz-tag-')) props[k] = v
+  }
+  await patchAppProperties(env, file.id, props, existingTags)
+  return new Response(null, { status: 204, headers: { 'x-amz-request-id': requestId() } })
+}
+
+export async function handleGetObjectAttributes(env: Env, bucket: string, key: string): Promise<Response> {
+  const file = await findObject(env, bucket, key)
+  if (!file) return xml.s3Error(404, 'NoSuchKey', 'The specified key does not exist.', `/${bucket}/${key}`, requestId())
+  return xml.objectAttributesXml(file.id, file.size ?? '0')
+}
+
+export async function handlePutObjectAcl(env: Env, bucket: string, key: string): Promise<Response> {
+  const file = await findObject(env, bucket, key)
+  if (!file) return xml.s3Error(404, 'NoSuchKey', 'The specified key does not exist.', `/${bucket}/${key}`, requestId())
+  return new Response(null, { status: 200, headers: { 'x-amz-request-id': requestId() } })
 }

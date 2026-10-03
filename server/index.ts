@@ -85,7 +85,10 @@ async function dispatch(
     return multipart.handleCreateMultipart(env, req, bucket, key, waitUntil)
   }
   if (params.has('uploadId')) {
-    if (params.has('partNumber') && method === 'PUT') return multipart.handleUploadPart(env, req, bucket, key, params)
+    if (params.has('partNumber') && method === 'PUT') {
+      if (req.headers.get('x-amz-copy-source')) return multipart.handleUploadPartCopy(env, req, bucket, key, params)
+      return multipart.handleUploadPart(env, req, bucket, key, params)
+    }
     if (method === 'POST') return multipart.handleCompleteMultipart(env, req, bucket, key, params, sig.region)
     if (method === 'DELETE') return multipart.handleAbortMultipart(env, bucket, key, params)
     if (method === 'GET') return multipart.handleListParts(env, bucket, key, params)
@@ -93,8 +96,16 @@ async function dispatch(
   }
 
   const sub = objectSubResource(params)
-  if (sub.kind === 'acl') return objects.handleGetObjectAcl(env, bucket, key)
-  if (sub.kind === 'tagging') return objects.handleGetObjectTagging(env, bucket, key)
+  if (sub.kind === 'acl') {
+    if (method === 'PUT') return objects.handlePutObjectAcl(env, bucket, key)
+    return objects.handleGetObjectAcl(env, bucket, key)
+  }
+  if (sub.kind === 'tagging') {
+    if (method === 'GET') return objects.handleGetObjectTagging(env, bucket, key)
+    if (method === 'PUT') return objects.handlePutObjectTagging(env, req, bucket, key)
+    if (method === 'DELETE') return objects.handleDeleteObjectTagging(env, bucket, key)
+  }
+  if (sub.kind === 'attributes') return objects.handleGetObjectAttributes(env, bucket, key)
   if (sub.kind === 'unknown') {
     return notImplemented(rawPath, `${sub.name} is not supported by this gateway`)
   }
@@ -177,7 +188,8 @@ async function dispatchBucket(
     case 'PUT':
       if (sub.kind === 'none') return buckets.handleCreateBucket(env, bucket, requested)
       if (sub.kind === 'unknown') return notImplemented(rawPath, `${sub.name} is not supported by this gateway`)
-      return notImplemented(rawPath, `PUT ${sub.kind} is not supported by this gateway`)
+      if (sub.kind === 'acl') return buckets.handlePutBucketAcl(env, bucket)
+      return buckets.handlePutBucketConfig(env, bucket, sub.kind)
     case 'POST':
       if (sub.kind === 'delete') return buckets.handleDeleteObjects(env, req, bucket)
       if (sub.kind === 'unknown') return notImplemented(rawPath, `${sub.name} is not supported by this gateway`)
@@ -185,7 +197,8 @@ async function dispatchBucket(
     case 'DELETE':
       if (sub.kind === 'delete') return buckets.handleDeleteObjects(env, req, bucket)
       if (sub.kind === 'unknown') return notImplemented(rawPath, `${sub.name} is not supported by this gateway`)
-      return buckets.handleDeleteBucket(env, bucket)
+      if (sub.kind === 'none') return buckets.handleDeleteBucket(env, bucket)
+      return buckets.handleDeleteBucketConfig(env, bucket, sub.kind)
     default:
       return methodNotAllowed(rawPath)
   }

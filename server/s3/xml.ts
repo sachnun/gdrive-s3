@@ -328,3 +328,27 @@ export function listPartsXml(
   ].join('')
   return new Response(xml, { status: 200, headers: XML_HEADERS })
 }
+
+export function objectAttributesXml(etag: string, size: string): Response {
+  const xml = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    `<GetObjectAttributesOutput xmlns="${XMLNS}">`,
+    `<ETag>${xmlEscape(etag)}</ETag>`,
+    `<ObjectSize>${xmlEscape(size)}</ObjectSize>`,
+    '<StorageClass>STANDARD</StorageClass>',
+    '</GetObjectAttributesOutput>',
+  ].join('')
+  return new Response(xml, { status: 200, headers: XML_HEADERS })
+}
+
+export function copyPartXml(etag: string, lastModified: string, range?: string | null): Response {
+  const parts = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    `<CopyPartResult xmlns="${XMLNS}">`,
+    `<LastModified>${xmlEscape(lastModified)}</LastModified>`,
+    `<ETag>&quot;${xmlEscape(etag)}&quot;</ETag>`,
+  ]
+  if (range) parts.push(`<CopySourceRange>${xmlEscape(range)}</CopySourceRange>`)
+  parts.push('</CopyPartResult>')
+  return new Response(parts.join(''), { status: 200, headers: XML_HEADERS })
+}

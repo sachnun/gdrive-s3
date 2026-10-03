@@ -217,3 +217,25 @@ export async function listFolderFiles(env: Env, parentId: string): Promise<FileM
   }
   return out
 }
+
+export async function patchAppProperties(
+  env: Env,
+  id: string,
+  appProperties: Record<string, string>,
+  clear: string[] = [],
+): Promise<FileMeta> {
+  const body: Record<string, unknown> = { appProperties }
+  if (clear.length > 0) {
+    const nulls: Record<string, null> = {}
+    for (const k of clear) nulls[k] = null
+    body.appProperties = { ...nulls, ...appProperties }
+  }
+  const res = await driveFetch(env, `${DRIVE_API}/drive/v3/files/${id}?fields=${FILE_FIELDS}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (res.status === 404) throw new DriveError(404, 'NoSuchKey', 'The specified key does not exist.')
+  if (!res.ok) throw new DriveError(500, 'InternalError', `appProperties patch failed (HTTP ${res.status})`)
+  return (await res.json()) as FileMeta
+}

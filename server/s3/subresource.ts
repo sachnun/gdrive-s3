@@ -25,6 +25,7 @@ type SubResource =
   | { kind: 'objectLock' }
   | { kind: 'objectLockEnabled' }
   | { kind: 'delete' }
+  | { kind: 'attributes' }
   | { kind: 'unknown'; name: string }
 
 const KNOWN = new Set([
@@ -109,7 +110,7 @@ export function bucketSubResource(params: URLSearchParams): SubResource {
 export function objectSubResource(params: URLSearchParams): SubResource {
   if (params.has('acl')) return { kind: 'acl' }
   if (params.has('tagging')) return { kind: 'tagging' }
-  if (params.has('attributes')) return { kind: 'unknown', name: 'attributes' }
+  if (params.has('attributes')) return { kind: 'attributes' }
   if (params.has('torrent')) return { kind: 'unknown', name: 'torrent' }
   if (params.has('legal-hold')) return { kind: 'unknown', name: 'legal-hold' }
   if (params.has('retention')) return { kind: 'unknown', name: 'retention' }

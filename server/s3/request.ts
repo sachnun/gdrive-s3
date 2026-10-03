@@ -81,3 +81,15 @@ export function unescapeXml(s: string): string {
     .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(parseInt(n, 10)))
     .replace(/&amp;/g, '&')
 }
+
+export function extractXmlTags(body: string): { key: string; value: string }[] {
+  const out: { key: string; value: string }[] = []
+  const re = /<Tag>([\s\S]*?)<\/Tag>/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(body))) {
+    const k = /<Key>([\s\S]*?)<\/Key>/.exec(m[1])
+    const v = /<Value>([\s\S]*?)<\/Value>/.exec(m[1])
+    if (k) out.push({ key: unescapeXml(k[1].trim()), value: v ? unescapeXml(v[1].trim()) : '' })
+  }
+  return out
+}

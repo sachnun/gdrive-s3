@@ -342,6 +342,12 @@ export function makeFetchStub(drive: FakeDrive, opts: StubOptions = {}): FetchSt
       if (!f) return new Response('not found', { status: 404 })
       const patch = JSON.parse(new TextDecoder().decode(await readBody(body)))
       if (patch.trashed) f.trashed = true
+      if (patch.appProperties !== undefined) {
+        const merged = { ...(f.appProperties ?? {}), ...(patch.appProperties as Record<string, string | null>) }
+        const next: Record<string, string> = {}
+        for (const [k, v] of Object.entries(merged)) if (v != null) next[k] = v
+        f.appProperties = Object.keys(next).length ? next : undefined
+      }
       f.modifiedTime = new Date().toISOString()
       return new Response(JSON.stringify(toFile(f)), { status: 200, headers: { 'Content-Type': 'application/json' } })
     }

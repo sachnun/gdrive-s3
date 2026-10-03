@@ -271,3 +271,18 @@ export async function listUploads(
   out.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
   return out
 }
+
+export async function uploadPartMeta(
+  env: Env,
+  uploadId: string,
+  partNumber: string,
+  fileId: string,
+  size: number,
+  etag: string,
+): Promise<void> {
+  const state = await getState(env, uploadId)
+  const existing = state.parts[partNumber]
+  if (existing) await trashFile(env, existing.fileId)
+  state.parts[partNumber] = { fileId, size, etag }
+  await env.FOLDER_CACHE.put(stateKey(uploadId), JSON.stringify(state))
+}

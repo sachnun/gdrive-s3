@@ -119,8 +119,12 @@ describe('bucket sub-resources', () => {
     expect(xml).toContain('<IsLatest>true</IsLatest>')
   })
 
-  it('rejects PUT on unsupported bucket configuration', async () => {
-    for (const sub of ['tagging', 'cors', 'lifecycle', 'policy']) {
+  it('accepts PUT on supported bucket configuration and rejects the rest', async () => {
+    for (const sub of ['tagging', 'cors', 'lifecycle', 'policy', 'encryption', 'website', 'replication']) {
+      const res = await s3(ctx, 'PUT', `/test-bucket?${sub}`, { body: '<x/>' })
+      expect(res.status, sub).toBe(200)
+    }
+    for (const sub of ['inventory', 'metrics', 'analytics']) {
       const res = await s3(ctx, 'PUT', `/test-bucket?${sub}`, { body: '<x/>' })
       expect(res.status, sub).toBe(501)
     }
@@ -160,11 +164,46 @@ describe('object sub-resources', () => {
   })
 
   it('returns NotImplemented for unsupported object sub-resources', async () => {
-    for (const sub of ['attributes', 'torrent', 'legal-hold', 'retention']) {
+    for (const sub of ['torrent', 'legal-hold', 'retention']) {
       const res = await s3(ctx, 'GET', `/test-bucket/obj.txt?${sub}`)
       expect(res.status, sub).toBe(501)
       expect(await res.text(), sub).toContain('NotImplemented')
     }
+  })
+
+  it('serves GetObjectAttributes', async () => {
+    const res = await s3(ctx, 'GET', '/test-bucket/obj.txt?attributes')
+    expect(res.status).toBe(200)
+    const xml = await res.text()
+    expect(rootOf(xml)).toBe('GetObjectAttributesOutput')
+    expect(xml).toContain('<ObjectSize>1</ObjectSize>')
+    expect(xml).toContain('<StorageClass>STANDARD</StorageClass>')
+  })
+
+  it('round-trips object tagging through Drive appProperties', async () => {
+    const put = await s3(ctx, 'PUT', '/test-bucket/obj.txt?tagging', {
+      body: '<Tagging><TagSet><Tag><Key>env</Key><Value>prod</Value></Tag><Tag><Key>team</Key><Value>media</Value></Tag></TagSet></Tagging>',
+    })
+    expect(put.status).toBe(200)
+
+    const got = await (await s3(ctx, 'GET', '/test-bucket/obj.txt?tagging')).text()
+    expect(got).toContain('<Key>env</Key><Value>prod</Value>')
+    expect(got).toContain('<Key>team</Key><Value>media</Value>')
+
+    expect((await s3(ctx, 'DELETE', '/test-bucket/obj.txt?tagging')).status).toBe(204)
+    const after = await (await s3(ctx, 'GET', '/test-bucket/obj.txt?tagging')).text()
+    expect(after).toContain('<TagSet></TagSet>')
+  })
+
+  it('keeps user metadata when tagging is written', async () => {
+    await s3(ctx, 'PUT', '/test-bucket/meta.txt', { body: 'x', headers: { 'x-amz-meta-color': 'red' } })
+    await s3(ctx, 'PUT', '/test-bucket/meta.txt?tagging', {
+      body: '<Tagging><TagSet><Tag><Key>k</Key><Value>v</Value></Tag></TagSet></Tagging>',
+    })
+    const head = await s3(ctx, 'HEAD', '/test-bucket/meta.txt')
+    expect(head.headers.get('x-amz-meta-color')).toBe('red')
+    const tags = await (await s3(ctx, 'GET', '/test-bucket/meta.txt?tagging')).text()
+    expect(tags).toContain('<Key>k</Key><Value>v</Value>')
   })
 
   it('lists uploaded parts as ListPartsResult', async () => {
@@ -336,5 +375,97 @@ describe('sub-resource routing never falls through to a listing', () => {
     const res = await s3(ctx, 'DELETE', '/test-bucket?frobnicate')
     expect(res.status).toBe(501)
     expect((await s3(ctx, 'HEAD', '/test-bucket')).status).toBe(200)
+  })
+})
+
+describe('bucket configuration writes', () => {
+  let ctx: TestSetup
+
+  beforeEach(async () => {
+    ctx = await setupTest()
+    await s3(ctx, 'PUT', '/test-bucket')
+  })
+  afterEach(() => ctx.restore())
+
+  it('accepts and deletes supported configuration sub-resources', async () => {
+    for (const sub of ['tagging', 'cors', 'lifecycle', 'policy', 'encryption', 'website', 'replication', 'notification', 'logging', 'accelerate', 'requestPayment', 'publicAccessBlock', 'ownershipControls', 'versioning']) {
+      const put = await s3(ctx, 'PUT', `/test-bucket?${sub}`, { body: '<x/>' })
+      expect(put.status, `PUT ${sub}`).toBe(200)
+      const del = await s3(ctx, 'DELETE', `/test-bucket?${sub}`)
+      expect(del.status, `DELETE ${sub}`).toBe(204)
+    }
+  })
+
+  it('accepts PUT and DELETE on the bucket ACL', async () => {
+    expect((await s3(ctx, 'PUT', '/test-bucket?acl', { body: '<x/>' })).status).toBe(200)
+    expect((await s3(ctx, 'PUT', '/test-bucket/obj.txt?acl', { body: '<x/>' })).status).toBe(404)
+    await s3(ctx, 'PUT', '/test-bucket/obj.txt', { body: 'x' })
+    expect((await s3(ctx, 'PUT', '/test-bucket/obj.txt?acl', { body: '<x/>' })).status).toBe(200)
+  })
+
+  it('rejects configuration writes on a missing bucket with NoSuchBucket', async () => {
+    expect((await s3(ctx, 'PUT', '/missing-bucket?tagging', { body: '<x/>' })).status).toBe(404)
+    expect((await s3(ctx, 'DELETE', '/missing-bucket?cors')).status).toBe(404)
+  })
+
+  it('returns NotImplemented for configuration we do not model', async () => {
+    for (const sub of ['inventory', 'metrics', 'analytics']) {
+      const res = await s3(ctx, 'PUT', `/test-bucket?${sub}`, { body: '<x/>' })
+      expect(res.status, sub).toBe(501)
+    }
+  })
+
+  it('DELETE without a sub-resource still removes the bucket', async () => {
+    expect((await s3(ctx, 'DELETE', '/test-bucket')).status).toBe(204)
+    expect((await s3(ctx, 'HEAD', '/test-bucket')).status).toBe(404)
+  })
+})
+
+describe('UploadPartCopy', () => {
+  let ctx: TestSetup
+
+  beforeEach(async () => {
+    ctx = await setupTest()
+    await s3(ctx, 'PUT', '/test-bucket')
+    await s3(ctx, 'PUT', '/test-bucket/src.bin', { body: 'SOURCE-DATA' })
+  })
+  afterEach(() => ctx.restore())
+
+  it('copies a part into an upload and completes it', async () => {
+    const init = await s3(ctx, 'POST', '/test-bucket/dst.bin?uploads')
+    const uploadId = xmlTag(await init.text(), 'UploadId')!
+
+    const copy = await s3(ctx, 'PUT', `/test-bucket/dst.bin?uploadId=${uploadId}&partNumber=1`, {
+      headers: { 'x-amz-copy-source': '/test-bucket/src.bin' },
+    })
+    expect(copy.status).toBe(200)
+    const copyXml = await copy.text()
+    expect(rootOf(copyXml)).toBe('CopyPartResult')
+    expect(xmlTag(copyXml, 'ETag')).toBeTruthy()
+
+    const etag = xmlTag(copyXml, 'ETag')!.replace(/&quot;/g, '"')
+    const done = await s3(ctx, 'POST', `/test-bucket/dst.bin?uploadId=${uploadId}`, {
+      body: `<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>${etag}</ETag></Part></CompleteMultipartUpload>`,
+    })
+    expect(done.status).toBe(200)
+    expect(await (await s3(ctx, 'GET', '/test-bucket/dst.bin')).text()).toBe('SOURCE-DATA')
+  })
+
+  it('returns NoSuchKey for a missing copy source', async () => {
+    const init = await s3(ctx, 'POST', '/test-bucket/dst.bin?uploads')
+    const uploadId = xmlTag(await init.text(), 'UploadId')!
+    const res = await s3(ctx, 'PUT', `/test-bucket/dst.bin?uploadId=${uploadId}&partNumber=1`, {
+      headers: { 'x-amz-copy-source': '/test-bucket/nope.bin' },
+    })
+    expect(res.status).toBe(404)
+    expect(await res.text()).toContain('NoSuchKey')
+  })
+
+  it('returns NoSuchUpload for an unknown upload id', async () => {
+    const res = await s3(ctx, 'PUT', '/test-bucket/dst.bin?uploadId=nope&partNumber=1', {
+      headers: { 'x-amz-copy-source': '/test-bucket/src.bin' },
+    })
+    expect(res.status).toBe(404)
+    expect(await res.text()).toContain('NoSuchUpload')
   })
 })

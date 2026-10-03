@@ -1,6 +1,7 @@
 import type { Env } from '../env'
-import { getOrCreateFolder, resolvePathCreate } from '../drive/folder'
-import { abortMultipart, completeMultipart, createMultipart, gcMultipart, getMultipartState, uploadPart } from '../drive/multipart'
+import { findCachedFolder, getOrCreateFolder, resolveExistingPath, resolvePathCreate } from '../drive/folder'
+import { abortMultipart, completeMultipart, createMultipart, gcMultipart, getMultipartState, uploadPart, uploadPartMeta } from '../drive/multipart'
+import { copyFile, findFilesInFolder } from '../drive/files'
 import { bufferIfSmall, extractParts, uploadBody } from '../s3/request'
 import * as xml from '../s3/xml'
 import { requestId } from '../util'
@@ -69,4 +70,36 @@ export async function handleListParts(env: Env, bucket: string, key: string, par
   const state = await getMultipartState(env, uploadId)
   if (!state) return xml.s3Error(404, 'NoSuchUpload', 'The specified multipart upload does not exist.', `/${bucket}/${key}`, requestId())
   return xml.listPartsXml(bucket, key, uploadId, state.parts)
+}
+
+export async function handleUploadPartCopy(
+  env: Env,
+  req: Request,
+  bucket: string,
+  key: string,
+  params: URLSearchParams,
+): Promise<Response> {
+  const uploadId = params.get('uploadId') ?? ''
+  const partNumber = params.get('partNumber') ?? ''
+  const state = await getMultipartState(env, uploadId)
+  if (!state) return xml.s3Error(404, 'NoSuchUpload', 'The specified multipart upload does not exist.', `/${bucket}/${key}`, requestId())
+
+  const raw = req.headers.get('x-amz-copy-source') ?? ''
+  const srcPath = decodeURIComponent(raw).replace(/^\/+/, '')
+  const slash = srcPath.indexOf('/')
+  if (slash === -1) return xml.s3Error(400, 'InvalidArgument', 'Invalid copy source', `/${bucket}/${key}`, requestId())
+  const srcBucket = srcPath.slice(0, slash)
+  const srcKey = srcPath.slice(slash + 1)
+
+  const srcBucketId = await findCachedFolder(env, srcBucket, null)
+  if (!srcBucketId) return xml.s3Error(404, 'NoSuchKey', 'The specified key does not exist.', `/${bucket}/${key}`, requestId())
+  const target = await resolveExistingPath(env, srcBucketId, srcKey)
+  const src = target ? (await findFilesInFolder(env, target.name, target.parentId))[0] : undefined
+  if (!src) return xml.s3Error(404, 'NoSuchKey', 'The specified key does not exist.', `/${bucket}/${key}`, requestId())
+
+  const range = req.headers.get('x-amz-copy-source-range')
+  const copied = await copyFile(env, src.id, `part-${partNumber}`, state.folderId)
+  const size = Number(src.size ?? 0)
+  await uploadPartMeta(env, uploadId, partNumber, copied.id, size, copied.id)
+  return xml.copyPartXml(copied.id, copied.modifiedTime ?? new Date().toISOString(), range)
 }

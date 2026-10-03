@@ -2,8 +2,8 @@ import type { Env } from '../env'
 import { BUCKETS } from '../config'
 import { DRIVE_API, driveFetch } from '../drive/auth'
 import { DriveError } from '../drive/errors'
-import { FOLDER_MIME, findCachedFolder, folderCacheKey, getOrCreateFolder, resolveExistingFolderId } from '../drive/folder'
-import { listFolderFiles, trashFile, trashFiles } from '../drive/files'
+import { FOLDER_MIME, findCachedFolder, folderCacheKey, getOrCreateFolder, resolveExistingFolderId, resolveExistingPath } from '../drive/folder'
+import { findFilesInFolder, listFolderFiles, trashFile, trashFiles } from '../drive/files'
 import { MULTIPART_ROOT, listUploads } from '../drive/multipart'
 import { extractXmlKeys } from '../s3/request'
 import { listObjects, type ListOptions } from '../s3/list'
@@ -268,4 +268,59 @@ export async function handleGetObjectLockConfiguration(env: Env, bucket: string)
   const id = await findCachedFolder(env, bucket, null)
   if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
   return xml.s3Error(404, 'ObjectLockConfigurationNotFoundError', 'Object Lock configuration does not exist for this bucket', `/${bucket}`, requestId())
+}
+
+const BUCKET_CONFIG_ROOT: Record<string, string> = {
+  tagging: 'Tagging',
+  cors: 'CORSConfiguration',
+  lifecycle: 'LifecycleConfiguration',
+  policy: 'Policy',
+  website: 'WebsiteConfiguration',
+  replication: 'ReplicationConfiguration',
+  encryption: 'ServerSideEncryptionConfiguration',
+  notification: 'NotificationConfiguration',
+  logging: 'BucketLoggingStatus',
+  accelerate: 'AccelerateConfiguration',
+  requestPayment: 'RequestPaymentConfiguration',
+  publicAccessBlock: 'PublicAccessBlockConfiguration',
+  ownershipControls: 'OwnershipControls',
+  'object-lock': 'ObjectLockConfiguration',
+  versioning: 'VersioningConfiguration',
+}
+
+export async function handlePutBucketConfig(env: Env, bucket: string, sub: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  if (!(sub in BUCKET_CONFIG_ROOT)) {
+    return xml.s3Error(501, 'NotImplemented', `PUT ${sub} is not supported by this gateway`, `/${bucket}`, requestId())
+  }
+  return new Response(null, { status: 200, headers: { 'x-amz-request-id': requestId() } })
+}
+
+export async function handleDeleteBucketConfig(env: Env, bucket: string, sub: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  if (!(sub in BUCKET_CONFIG_ROOT)) {
+    return xml.s3Error(501, 'NotImplemented', `DELETE ${sub} is not supported by this gateway`, `/${bucket}`, requestId())
+  }
+  return new Response(null, { status: 204, headers: { 'x-amz-request-id': requestId() } })
+}
+
+async function findObject(
+  env: Env,
+  bucket: string,
+  key: string,
+): Promise<{ id: string } | null> {
+  const bucketFolderId = await findCachedFolder(env, bucket, null)
+  if (!bucketFolderId) return null
+  const target = await resolveExistingPath(env, bucketFolderId, key)
+  if (!target) return null
+  const files = await findFilesInFolder(env, target.name, target.parentId)
+  return files[0] ? { id: files[0].id } : null
+}
+
+export async function handlePutBucketAcl(env: Env, bucket: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  return new Response(null, { status: 200, headers: { 'x-amz-request-id': requestId() } })
 }
