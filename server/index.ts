@@ -115,6 +115,7 @@ async function dispatch(
     return objects.handleGetObjectRetention(env, bucket, key)
   }
   if (sub.kind === 'rename' && method === 'PUT') return objects.handleRenameObject(env, req, bucket, key)
+  if (sub.kind === 'restore' && method === 'POST') return objects.handleRestoreObject(env, bucket, key)
   if (sub.kind === 'unknown') {
     return notImplemented(rawPath, `${sub.name} is not supported by this gateway`)
   }
@@ -187,6 +188,10 @@ async function dispatchBucket(
           return buckets.handleGetObjectLockConfiguration(env, bucket)
         case 'abac':
           return buckets.handleGetBucketAbac(env, bucket)
+        case 'policyStatus':
+          return buckets.handleGetBucketPolicyStatus(env, bucket)
+        case 'metadataTable':
+          return buckets.handleGetBucketMetadataTable(env, bucket)
         case 'listConfig':
           if (params.get('id')) return buckets.handleGetBucketConfigById(env, bucket, sub.name, params.get('id')!)
           return buckets.handleListBucketConfig(env, bucket, sub.name)
@@ -203,6 +208,7 @@ async function dispatchBucket(
       if (sub.kind === 'none') return buckets.handleCreateBucket(env, bucket, requested)
       if (sub.kind === 'unknown') return notImplemented(rawPath, `${sub.name} is not supported by this gateway`)
       if (sub.kind === 'acl') return buckets.handlePutBucketAcl(env, bucket)
+      if (sub.kind === 'versioning') return buckets.handlePutBucketVersioning(env, req, bucket)
       return buckets.handlePutBucketConfig(env, bucket, sub.kind)
     case 'POST':
       if (sub.kind === 'delete') return buckets.handleDeleteObjects(env, req, bucket)

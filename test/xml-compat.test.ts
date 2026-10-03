@@ -430,12 +430,32 @@ describe('bucket configuration writes', () => {
   afterEach(() => ctx.restore())
 
   it('accepts and deletes supported configuration sub-resources', async () => {
-    for (const sub of ['tagging', 'cors', 'lifecycle', 'policy', 'encryption', 'website', 'replication', 'notification', 'logging', 'accelerate', 'requestPayment', 'publicAccessBlock', 'ownershipControls', 'versioning']) {
+    for (const sub of ['tagging', 'cors', 'lifecycle', 'policy', 'encryption', 'website', 'replication', 'notification', 'logging', 'accelerate', 'requestPayment', 'publicAccessBlock', 'ownershipControls']) {
       const put = await s3(ctx, 'PUT', `/test-bucket?${sub}`, { body: '<x/>' })
       expect(put.status, `PUT ${sub}`).toBe(200)
       const del = await s3(ctx, 'DELETE', `/test-bucket?${sub}`)
       expect(del.status, `DELETE ${sub}`).toBe(204)
     }
+  })
+
+  it('stores and reports the versioning status', async () => {
+    const empty = await (await s3(ctx, 'GET', '/test-bucket?versioning')).text()
+    expect(empty).not.toContain('<Status>')
+
+    expect((await s3(ctx, 'PUT', '/test-bucket?versioning', { body: '<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>' })).status).toBe(200)
+    expect(await (await s3(ctx, 'GET', '/test-bucket?versioning')).text()).toContain('<Status>Enabled</Status>')
+
+    expect((await s3(ctx, 'PUT', '/test-bucket?versioning', { body: '<VersioningConfiguration><Status>Suspended</Status></VersioningConfiguration>' })).status).toBe(200)
+    expect(await (await s3(ctx, 'GET', '/test-bucket?versioning')).text()).toContain('<Status>Suspended</Status>')
+
+    expect((await s3(ctx, 'DELETE', '/test-bucket?versioning')).status).toBe(204)
+    expect(await (await s3(ctx, 'GET', '/test-bucket?versioning')).text()).not.toContain('<Status>')
+  })
+
+  it('rejects a versioning body without a Status', async () => {
+    const res = await s3(ctx, 'PUT', '/test-bucket?versioning', { body: '<VersioningConfiguration/>' })
+    expect(res.status).toBe(400)
+    expect(await res.text()).toContain('MalformedXML')
   })
 
   it('accepts PUT and DELETE on the bucket ACL', async () => {
@@ -559,6 +579,59 @@ describe('bucket list-configuration operations', () => {
       const res = await s3(ctx, 'GET', `/missing-bucket?${sub}`)
       expect(res.status, sub).toBe(404)
       expect(await res.text(), sub).toContain('NoSuchBucket')
+    }
+  })
+})
+
+describe('policy status, restore and metadata table', () => {
+  let ctx: TestSetup
+
+  beforeEach(async () => {
+    ctx = await setupTest()
+    await s3(ctx, 'PUT', '/test-bucket')
+    await s3(ctx, 'PUT', '/test-bucket/obj.txt', { body: 'x' })
+  })
+  afterEach(() => ctx.restore())
+
+  it('serves GetBucketPolicyStatus', async () => {
+    const res = await s3(ctx, 'GET', '/test-bucket?policyStatus')
+    expect(res.status).toBe(200)
+    const xml = await res.text()
+    expect(rootOf(xml)).toBe('PolicyStatus')
+    expect(xml).toContain('<IsPublic>false</IsPublic>')
+  })
+
+  it('reports NoSuchConfiguration for the metadata table', async () => {
+    const res = await s3(ctx, 'GET', '/test-bucket?metadataTable')
+    expect(res.status).toBe(404)
+    expect(await res.text()).toContain('NoSuchConfiguration')
+  })
+
+  it('accepts RestoreObject for an existing object and reports NoSuchKey otherwise', async () => {
+    const ok = await s3(ctx, 'POST', '/test-bucket/obj.txt?restore', {
+      body: '<RestoreRequest><Days>1</Days></RestoreRequest>',
+    })
+    expect(ok.status).toBe(200)
+    const missing = await s3(ctx, 'POST', '/test-bucket/nope.txt?restore', {
+      body: '<RestoreRequest><Days>1</Days></RestoreRequest>',
+    })
+    expect(missing.status).toBe(404)
+    expect(await missing.text()).toContain('NoSuchKey')
+  })
+
+  it('reports NoSuchBucket for these sub-resources on a missing bucket', async () => {
+    for (const sub of ['policyStatus', 'metadataTable']) {
+      const res = await s3(ctx, 'GET', `/missing-bucket?${sub}`)
+      expect(res.status, sub).toBe(404)
+      expect(await res.text(), sub).toContain('NoSuchBucket')
+    }
+  })
+
+  it('keeps unknown sub-resources at NotImplemented rather than a listing', async () => {
+    for (const sub of ['session', 'annotation']) {
+      const res = await s3(ctx, 'GET', `/test-bucket?${sub}`)
+      expect(res.status, sub).toBe(501)
+      expect(await res.text(), sub).toContain('NotImplemented')
     }
   })
 })

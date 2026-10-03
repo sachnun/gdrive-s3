@@ -239,3 +239,9 @@ export async function handleRenameObject(env: Env, req: Request, bucket: string,
   await trashFile(env, src.id)
   return new Response(null, { status: 200, headers: { 'x-amz-request-id': requestId() } })
 }
+
+export async function handleRestoreObject(env: Env, bucket: string, key: string): Promise<Response> {
+  const file = await findObject(env, bucket, key)
+  if (!file) return xml.s3Error(404, 'NoSuchKey', 'The specified key does not exist.', `/${bucket}/${key}`, requestId())
+  return new Response(null, { status: 200, headers: { 'x-amz-request-id': requestId() } })
+}

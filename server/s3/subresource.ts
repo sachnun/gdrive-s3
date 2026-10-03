@@ -30,6 +30,9 @@ type SubResource =
   | { kind: 'retention' }
   | { kind: 'rename' }
   | { kind: 'abac' }
+  | { kind: 'policyStatus' }
+  | { kind: 'metadataTable' }
+  | { kind: 'restore' }
   | { kind: 'listConfig'; name: string }
   | { kind: 'unknown'; name: string }
 
@@ -79,6 +82,16 @@ const KNOWN = new Set([
   'response-expires',
   'x-id',
   'attributes',
+  'policyStatus',
+  'metadataTable',
+  'restore',
+  'renameObject',
+  'legal-hold',
+  'retention',
+  'abac',
+  'annotation',
+  'torrent',
+  'session',
 ])
 
 /** Bucket-level sub-resource carried in the query string. */
@@ -104,6 +117,10 @@ export function bucketSubResource(params: URLSearchParams): SubResource {
   if (params.has('object-lock')) return { kind: 'objectLock' }
   if (params.has('objectLockEnabled')) return { kind: 'objectLockEnabled' }
   if (params.has('abac')) return { kind: 'abac' }
+  if (params.has('policyStatus')) return { kind: 'policyStatus' }
+  if (params.has('metadataTable')) return { kind: 'metadataTable' }
+  if (params.has('session')) return { kind: 'unknown', name: 'session' }
+  if (params.has('annotation')) return { kind: 'unknown', name: 'annotation' }
   for (const name of ['inventory', 'metrics', 'analytics', 'intelligent-tiering']) {
     if (params.has(name)) return { kind: 'listConfig', name }
   }
@@ -121,9 +138,11 @@ export function objectSubResource(params: URLSearchParams): SubResource {
   if (params.has('tagging')) return { kind: 'tagging' }
   if (params.has('attributes')) return { kind: 'attributes' }
   if (params.has('torrent')) return { kind: 'unknown', name: 'torrent' }
+  if (params.has('annotation')) return { kind: 'unknown', name: 'annotation' }
   if (params.has('legal-hold')) return { kind: 'legal-hold' }
   if (params.has('retention')) return { kind: 'retention' }
   if (params.has('renameObject')) return { kind: 'rename' }
+  if (params.has('restore')) return { kind: 'restore' }
   return { kind: 'none' }
 }
 

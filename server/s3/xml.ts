@@ -167,9 +167,15 @@ export function listObjectsXml(opts: ListOptions, result: ListResult, requestId 
   return new Response(head.concat(parts, '</ListBucketResult>').join(''), { status: 200, headers: { ...XML_HEADERS, 'x-amz-request-id': requestId } })
 }
 
-export function versioningXml(): Response {
-  const xml = `<?xml version="1.0" encoding="UTF-8"?><VersioningConfiguration xmlns="${XMLNS}"><Status>Suspended</Status></VersioningConfiguration>`
-  return new Response(xml, { status: 200, headers: { ...XML_HEADERS, 'x-amz-request-id': '' } })
+export function versioningXml(status: 'Enabled' | 'Suspended' | null = null): Response {
+  const inner = status ? `<Status>${status}</Status>` : ''
+  const xml = `<?xml version="1.0" encoding="UTF-8"?><VersioningConfiguration xmlns="${XMLNS}">${inner}</VersioningConfiguration>`
+  return new Response(xml, { status: 200, headers: XML_HEADERS })
+}
+
+export function policyStatusXml(): Response {
+  const xml = `<?xml version="1.0" encoding="UTF-8"?><PolicyStatus xmlns="${XMLNS}"><IsPublic>false</IsPublic></PolicyStatus>`
+  return new Response(xml, { status: 200, headers: XML_HEADERS })
 }
 
 export function aclXml(): Response {

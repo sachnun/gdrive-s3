@@ -1,6 +1,7 @@
 import type { Env } from '../env'
 import { BUCKETS } from '../config'
 import { DRIVE_API, driveFetch } from '../drive/auth'
+import { deleteVersioning, getVersioning, setVersioning } from '../drive/bucket-config'
 import { DriveError } from '../drive/errors'
 import { FOLDER_MIME, findCachedFolder, folderCacheKey, getOrCreateFolder, resolveExistingFolderId, resolveExistingPath } from '../drive/folder'
 import { findFilesInFolder, listFolderFiles, trashFile, trashFiles } from '../drive/files'
@@ -161,7 +162,7 @@ export async function handleListMultipartUploads(env: Env, bucket: string, param
 export async function handleGetBucketVersioning(env: Env, bucket: string): Promise<Response> {
   const id = await findCachedFolder(env, bucket, null)
   if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
-  return xml.versioningXml()
+  return xml.versioningXml(await getVersioning(env, bucket))
 }
 
 export async function handleGetBucketAcl(env: Env, bucket: string): Promise<Response> {
@@ -303,6 +304,7 @@ export async function handleDeleteBucketConfig(env: Env, bucket: string, sub: st
   if (!(sub in BUCKET_CONFIG_ROOT)) {
     return xml.s3Error(501, 'NotImplemented', `DELETE ${sub} is not supported by this gateway`, `/${bucket}`, requestId())
   }
+  if (sub === 'versioning') await deleteVersioning(env, bucket)
   return new Response(null, { status: 204, headers: { 'x-amz-request-id': requestId() } })
 }
 
@@ -358,4 +360,26 @@ export async function handleGetBucketConfigById(env: Env, bucket: string, kind: 
   }
   const code = codes[kind] ?? 'NoSuchConfiguration'
   return xml.s3Error(404, code, `The specified ${kind} configuration does not exist`, `/${bucket}`, requestId())
+}
+
+export async function handlePutBucketVersioning(env: Env, req: Request, bucket: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  const body = await req.text()
+  const status = /<Status>\s*(Enabled|Suspended)\s*<\/Status>/i.exec(body)?.[1]
+  if (!status) return xml.s3Error(400, 'MalformedXML', 'The XML you provided was not well-formed or did not validate against our published schema', `/${bucket}`, requestId())
+  await setVersioning(env, bucket, status === 'Enabled' ? 'Enabled' : 'Suspended')
+  return new Response(null, { status: 200, headers: { 'x-amz-request-id': requestId() } })
+}
+
+export async function handleGetBucketPolicyStatus(env: Env, bucket: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  return xml.policyStatusXml()
+}
+
+export async function handleGetBucketMetadataTable(env: Env, bucket: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  return xml.s3Error(404, 'NoSuchConfiguration', 'The metadata table configuration does not exist', `/${bucket}`, requestId())
 }
