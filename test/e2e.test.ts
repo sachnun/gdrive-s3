@@ -339,7 +339,7 @@ describe('S3 e2e (aws4fetch as client)', () => {
     expect(res.status).toBe(200)
 
     const list = await (await s3(ctx, 'GET', '/ANIME?list-type=2')).text()
-    expect(list).toContain('<Name>Anime</Name>')
+    expect(list).toContain('<Name>anime</Name>')
     expect(list).toContain('<Key>Show/ep1.mkv</Key>')
     expect((await s3(ctx, 'HEAD', '/anime/Show/ep1.mkv')).status).toBe(200)
     expect(await (await s3(ctx, 'GET', '/Anime/Show/ep1.mkv')).text()).toBe('x')
@@ -525,3 +525,59 @@ async function makeBadSignedPut(ctx: TestSetup): Promise<Response> {
   signed.headers.set('host', 'localhost')
   return ctx.app.fetch(signed)
 }
+
+describe('bucket name casing in responses', () => {
+  let ctx: TestSetup
+
+  beforeEach(async () => {
+    ctx = await setupTest()
+  })
+  afterEach(() => ctx.restore())
+
+  it('reports lowercase bucket names while keeping object keys verbatim', async () => {
+    ctx.drive.addFile({ name: 'Anime', mimeType: 'application/vnd.google-apps.folder', parents: ['root'] })
+    await s3(ctx, 'PUT', '/anime/Show/Case Sensitive Name.mkv', { body: 'x' })
+
+    const list = await (await s3(ctx, 'GET', '/anime?list-type=2&prefix=Show%2F')).text()
+    expect(list).toContain('<Name>anime</Name>')
+    expect(list).not.toContain('<Name>Anime</Name>')
+    expect(list).toContain('<Key>Show/Case Sensitive Name.mkv</Key>')
+
+    const prefixList = await (await s3(ctx, 'GET', '/Anime?list-type=2&delimiter=%2F')).text()
+    expect(prefixList).toContain('<Name>anime</Name>')
+    expect(prefixList).toContain('<Prefix>Show/</Prefix>')
+
+    const buckets = await (await s3(ctx, 'GET', '/')).text()
+    expect(buckets).toContain('<Name>anime</Name>')
+    expect(buckets).not.toContain('<Name>Anime</Name>')
+  })
+
+  it('lowercases the bucket in multipart responses but not the key', async () => {
+    ctx.drive.addFile({ name: 'Anime', mimeType: 'application/vnd.google-apps.folder', parents: ['root'] })
+    const init = await s3(ctx, 'POST', '/anime/Big File.bin?uploads')
+    const initXml = await init.text()
+    expect(initXml).toContain('<Bucket>anime</Bucket>')
+    expect(initXml).toContain('<Key>Big File.bin</Key>')
+
+    const uploadId = /<UploadId>([^<]+)<\/UploadId>/.exec(initXml)![1]
+    const part = await s3(ctx, 'PUT', `/anime/Big File.bin?uploadId=${uploadId}&partNumber=1`, { body: 'AAAAA' })
+    const etag = part.headers.get('etag')!.replace(/"/g, '')
+    const done = await s3(ctx, 'POST', `/anime/Big File.bin?uploadId=${uploadId}`, {
+      body: `<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>"${etag}"</ETag></Part></CompleteMultipartUpload>`,
+    })
+    const doneXml = await done.text()
+    expect(doneXml).toContain('<Bucket>anime</Bucket>')
+    expect(doneXml).toContain('<Key>Big File.bin</Key>')
+    expect(doneXml).toContain('https://anime.s3.us-east-1.amazonaws.com/Big File.bin')
+    expect(await (await s3(ctx, 'GET', '/anime/Big File.bin')).text()).toBe('AAAAA')
+  })
+
+  it('lowercases the bucket in errors and preserves the key casing', async () => {
+    ctx.drive.addFile({ name: 'Anime', mimeType: 'application/vnd.google-apps.folder', parents: ['root'] })
+    const res = await s3(ctx, 'GET', '/anime/Missing/File.MKV')
+    expect(res.status).toBe(404)
+    const xml = await res.text()
+    expect(xml).toContain('NoSuchKey')
+    expect(xml).toContain('<Resource>/anime/Missing/File.MKV</Resource>')
+  })
+})

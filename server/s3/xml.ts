@@ -18,18 +18,29 @@ export function s3Error(status: number, code: string, message: string, resource?
     '<Error>',
     `<Code>${xmlEscape(code)}</Code>`,
     `<Message>${xmlEscape(message)}</Message>`,
-    resource !== undefined ? `<Resource>${xmlEscape(resource)}</Resource>` : '',
+    resource !== undefined ? `<Resource>${xmlEscape(resourcePath(resource))}</Resource>` : '',
     `<RequestId>${xmlEscape(requestId)}</RequestId>`,
     '</Error>',
   ].join('')
   return new Response(xml, { status, headers: XML_HEADERS })
 }
 
+function bucketName(name: string): string {
+  return name.toLowerCase()
+}
+
+function resourcePath(resource: string): string {
+  if (!resource.startsWith('/')) return resource
+  const slash = resource.indexOf('/', 1)
+  if (slash === -1) return resource.toLowerCase()
+  return resource.slice(0, slash).toLowerCase() + resource.slice(slash)
+}
+
 export function listBucketsXml(buckets: { name: string; creationDate: string }[]): Response {
   const items = buckets
     .map(
       (b) =>
-        `<Bucket><Name>${xmlEscape(b.name)}</Name><CreationDate>${xmlEscape(b.creationDate)}</CreationDate></Bucket>`,
+        `<Bucket><Name>${xmlEscape(bucketName(b.name))}</Name><CreationDate>${xmlEscape(b.creationDate)}</CreationDate></Bucket>`,
     )
     .join('')
   const xml = [
@@ -51,7 +62,7 @@ export function initiateMultipartXml(bucket: string, key: string, uploadId: stri
   const xml = [
     '<?xml version="1.0" encoding="UTF-8"?>',
     `<InitiateMultipartUploadResult xmlns="${XMLNS}">`,
-    `<Bucket>${xmlEscape(bucket)}</Bucket>`,
+    `<Bucket>${xmlEscape(bucketName(bucket))}</Bucket>`,
     `<Key>${xmlEscape(key)}</Key>`,
     `<UploadId>${xmlEscape(uploadId)}</UploadId>`,
     '</InitiateMultipartUploadResult>',
@@ -65,12 +76,13 @@ export function uploadPartXml(etag: string): Response {
 }
 
 export function completeMultipartXml(bucket: string, key: string, etag: string, region = 'us-east-1'): Response {
-  const location = `https://${bucket}.s3.${region}.amazonaws.com/${key}`
+  const name = bucketName(bucket)
+  const location = `https://${name}.s3.${region}.amazonaws.com/${key}`
   const xml = [
     '<?xml version="1.0" encoding="UTF-8"?>',
     `<CompleteMultipartUploadResult xmlns="${XMLNS}">`,
     `<Location>${xmlEscape(location)}</Location>`,
-    `<Bucket>${xmlEscape(bucket)}</Bucket>`,
+    `<Bucket>${xmlEscape(name)}</Bucket>`,
     `<Key>${xmlEscape(key)}</Key>`,
     `<ETag>&quot;${xmlEscape(etag)}&quot;</ETag>`,
     '</CompleteMultipartUploadResult>',
@@ -138,7 +150,7 @@ export function listObjectsXml(opts: ListOptions, result: ListResult, requestId 
   const parts: string[] = [
     '<?xml version="1.0" encoding="UTF-8"?>',
     `<ListBucketResult xmlns="${XMLNS}">`,
-    `<Name>${xmlEscape(opts.bucket)}</Name>`,
+    `<Name>${xmlEscape(bucketName(opts.bucket))}</Name>`,
     `<Prefix>${xmlEscape(enc(opts.prefix, encodingType))}</Prefix>`,
   ]
   if (isV2) {
