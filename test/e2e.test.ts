@@ -581,3 +581,47 @@ describe('bucket name casing in responses', () => {
     expect(xml).toContain('<Resource>/anime/Missing/File.MKV</Resource>')
   })
 })
+
+describe('encoding-type=url', () => {
+  let ctx: TestSetup
+
+  beforeEach(async () => {
+    ctx = await setupTest()
+  })
+  afterEach(() => ctx.restore())
+
+  it('omits EncodingType and returns raw keys by default', async () => {
+    await s3(ctx, 'PUT', '/test-bucket', {})
+    await s3(ctx, 'PUT', '/test-bucket/a b/c d.txt', { body: 'x' })
+
+    const xml = await (await s3(ctx, 'GET', '/test-bucket?list-type=2&prefix=a%20b%2F')).text()
+    expect(xml).not.toContain('<EncodingType>')
+    expect(xml).toContain('<Key>a b/c d.txt</Key>')
+    expect(xml).toContain('<Prefix>a b/</Prefix>')
+  })
+
+  it('percent-encodes keys, prefixes and echoes EncodingType when requested', async () => {
+    await s3(ctx, 'PUT', '/test-bucket', {})
+    await s3(ctx, 'PUT', '/test-bucket/a b/c d.txt', { body: 'x' })
+
+    const xml = await (await s3(ctx, 'GET', '/test-bucket?list-type=2&encoding-type=url&prefix=a%20b%2F')).text()
+    expect(xml).toContain('<EncodingType>url</EncodingType>')
+    expect(xml).toContain('<Key>a%20b%2Fc%20d.txt</Key>')
+    expect(xml).toContain('<Prefix>a%20b%2F</Prefix>')
+
+    const delim = await (await s3(ctx, 'GET', '/test-bucket?list-type=2&encoding-type=url&delimiter=%2F')).text()
+    expect(delim).toContain('<EncodingType>url</EncodingType>')
+    expect(delim).toContain('<Prefix>a%20b%2F</Prefix>')
+  })
+
+  it('decodes encoding-type=url output back to the real key', async () => {
+    await s3(ctx, 'PUT', '/test-bucket', {})
+    await s3(ctx, 'PUT', '/test-bucket/Spaced%20Name/%C3%9Cn%C3%AFcode%20%26%20symbols.txt', { body: 'x' })
+
+    const xml = await (await s3(ctx, 'GET', '/test-bucket?list-type=2&encoding-type=url&prefix=Spaced%20Name%2F')).text()
+    const encoded = /<Key>([^<]+)<\/Key>/.exec(xml)?.[1]
+    expect(encoded).toBeTruthy()
+    expect(encoded).not.toBe('Spaced Name/Ünïcode & symbols.txt')
+    expect(decodeURIComponent(encoded!)).toBe('Spaced Name/Ünïcode & symbols.txt')
+  })
+})

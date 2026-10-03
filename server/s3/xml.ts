@@ -167,6 +167,7 @@ export function listObjectsXml(opts: ListOptions, result: ListResult, requestId 
     parts.push(`<MaxKeys>${opts.maxKeys}</MaxKeys>`)
   }
   if (opts.delimiter) parts.push(`<Delimiter>${xmlEscape(enc(opts.delimiter, encodingType))}</Delimiter>`)
+  if (encodingType) parts.push(`<EncodingType>${xmlEscape(encodingType)}</EncodingType>`)
   parts.push(`<IsTruncated>${result.isTruncated}</IsTruncated>`)
   parts.push(contents)
   parts.push(commonPrefixes)
