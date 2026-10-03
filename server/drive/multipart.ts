@@ -23,6 +23,16 @@ function stateKey(uploadId: string): string {
   return `multipart:${uploadId}`
 }
 
+export async function getMultipartState(env: Env, uploadId: string): Promise<MultipartState | null> {
+  const raw = await env.FOLDER_CACHE.get(stateKey(uploadId)).catch(() => null)
+  if (!raw) return null
+  try {
+    return JSON.parse(raw) as MultipartState
+  } catch {
+    return null
+  }
+}
+
 async function getState(env: Env, uploadId: string): Promise<MultipartState> {
   const raw = await env.FOLDER_CACHE.get(stateKey(uploadId))
   if (!raw) throw new DriveError(404, 'NoSuchUpload', 'The specified multipart upload does not exist.')
@@ -221,4 +231,43 @@ export async function gcMultipart(env: Env, bucket: string): Promise<void> {
     }
   } catch {
   }
+}
+
+export interface UploadSummary {
+  key: string
+  uploadId: string
+  initiated: string
+  size: number
+}
+
+export async function listUploads(
+  env: Env,
+  bucket: string,
+  prefix: string,
+  limit: number,
+): Promise<UploadSummary[]> {
+  const mpRoot = await findCachedFolder(env, MULTIPART_ROOT, null)
+  if (!mpRoot) return []
+  const bucketDir = await findCachedFolder(env, bucket, mpRoot)
+  if (!bucketDir) return []
+  const q = `'${bucketDir}' in parents and trashed=false and mimeType='${FOLDER_MIME}'`
+  const url = `${DRIVE_API}/drive/v3/files?q=${encodeURIComponent(q)}&pageSize=1000&fields=files(id,name,createdTime,modifiedTime)&spaces=drive`
+  const res = await driveFetch(env, url)
+  if (!res.ok) return []
+  const data = (await res.json()) as {
+    files: { id: string; name: string; createdTime: string; modifiedTime: string }[]
+  }
+  const out: UploadSummary[] = []
+  for (const f of data.files) {
+    if (out.length >= limit) break
+    const raw = await env.FOLDER_CACHE.get(stateKey(f.name)).catch(() => null)
+    if (!raw) continue
+    const state = JSON.parse(raw) as MultipartState
+    if (prefix && !state.key.startsWith(prefix)) continue
+    let size = 0
+    for (const p of Object.values(state.parts)) size += p.size
+    out.push({ key: state.key, uploadId: f.name, initiated: state.createdAt ? new Date(state.createdAt).toISOString() : f.createdTime, size })
+  }
+  out.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+  return out
 }

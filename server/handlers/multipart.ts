@@ -1,6 +1,6 @@
 import type { Env } from '../env'
 import { getOrCreateFolder, resolvePathCreate } from '../drive/folder'
-import { abortMultipart, completeMultipart, createMultipart, gcMultipart, uploadPart } from '../drive/multipart'
+import { abortMultipart, completeMultipart, createMultipart, gcMultipart, getMultipartState, uploadPart } from '../drive/multipart'
 import { bufferIfSmall, extractParts, uploadBody } from '../s3/request'
 import * as xml from '../s3/xml'
 import { requestId } from '../util'
@@ -62,4 +62,11 @@ export async function handleAbortMultipart(
   const uploadId = params.get('uploadId') ?? ''
   await abortMultipart(env, uploadId)
   return new Response(null, { status: 204, headers: { 'x-amz-request-id': requestId() } })
+}
+
+export async function handleListParts(env: Env, bucket: string, key: string, params: URLSearchParams): Promise<Response> {
+  const uploadId = params.get('uploadId') ?? ''
+  const state = await getMultipartState(env, uploadId)
+  if (!state) return xml.s3Error(404, 'NoSuchUpload', 'The specified multipart upload does not exist.', `/${bucket}/${key}`, requestId())
+  return xml.listPartsXml(bucket, key, uploadId, state.parts)
 }

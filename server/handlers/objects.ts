@@ -137,3 +137,15 @@ function metaHeaders(file: { appProperties?: Record<string, string> }): Record<s
   }
   return out
 }
+
+export async function handleGetObjectAcl(env: Env, bucket: string, key: string): Promise<Response> {
+  const file = await findObject(env, bucket, key)
+  if (!file) return xml.s3Error(404, 'NoSuchKey', 'The specified key does not exist.', `/${bucket}/${key}`, requestId())
+  return xml.aclXml()
+}
+
+export async function handleGetObjectTagging(env: Env, bucket: string, key: string): Promise<Response> {
+  const file = await findObject(env, bucket, key)
+  if (!file) return xml.s3Error(404, 'NoSuchKey', 'The specified key does not exist.', `/${bucket}/${key}`, requestId())
+  return xml.taggingXml(file.appProperties)
+}

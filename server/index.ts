@@ -8,6 +8,7 @@ import * as objects from './handlers/objects'
 import * as multipart from './handlers/multipart'
 import { errorResponse, preflightResponse, withCors } from './http'
 import * as xml from './s3/xml'
+import { bucketSubResource, notImplemented, objectSubResource } from './s3/subresource'
 import { requestId } from './util'
 
 interface ReqCtx {
@@ -87,7 +88,15 @@ async function dispatch(
     if (params.has('partNumber') && method === 'PUT') return multipart.handleUploadPart(env, req, bucket, key, params)
     if (method === 'POST') return multipart.handleCompleteMultipart(env, req, bucket, key, params, sig.region)
     if (method === 'DELETE') return multipart.handleAbortMultipart(env, bucket, key, params)
+    if (method === 'GET') return multipart.handleListParts(env, bucket, key, params)
     return xml.s3Error(400, 'InvalidRequest', 'Invalid multipart request', rawPath, requestId())
+  }
+
+  const sub = objectSubResource(params)
+  if (sub.kind === 'acl') return objects.handleGetObjectAcl(env, bucket, key)
+  if (sub.kind === 'tagging') return objects.handleGetObjectTagging(env, bucket, key)
+  if (sub.kind === 'unknown') {
+    return notImplemented(rawPath, `${sub.name} is not supported by this gateway`)
   }
 
   switch (method) {
@@ -114,20 +123,68 @@ async function dispatchBucket(
   region: string,
   requested: string,
 ): Promise<Response> {
+  const sub = bucketSubResource(params)
   switch (method) {
     case 'GET':
-      if (params.has('location')) return buckets.handleGetBucketLocation(env, bucket, region)
-      if (params.has('delete')) return buckets.handleDeleteObjects(env, req, bucket)
-      return buckets.handleListObjects(env, bucket, params, params.get('list-type') === '2')
+      switch (sub.kind) {
+        case 'location':
+          return buckets.handleGetBucketLocation(env, bucket, region)
+        case 'uploads':
+          return buckets.handleListMultipartUploads(env, bucket, params)
+        case 'versions':
+          return buckets.handleListObjectVersions(env, bucket, params)
+        case 'versioning':
+          return buckets.handleGetBucketVersioning(env, bucket)
+        case 'acl':
+          return buckets.handleGetBucketAcl(env, bucket)
+        case 'tagging':
+          return buckets.handleGetBucketTagging(env, bucket)
+        case 'policy':
+          return buckets.handleGetBucketPolicy(env, bucket)
+        case 'cors':
+          return buckets.handleGetBucketCors(env, bucket)
+        case 'lifecycle':
+          return buckets.handleGetBucketLifecycle(env, bucket)
+        case 'encryption':
+          return buckets.handleGetBucketEncryption(env, bucket)
+        case 'notification':
+          return buckets.handleGetBucketNotification(env, bucket)
+        case 'replication':
+          return buckets.handleGetBucketReplication(env, bucket)
+        case 'website':
+          return buckets.handleGetBucketWebsite(env, bucket)
+        case 'logging':
+          return buckets.handleGetBucketLogging(env, bucket)
+        case 'accelerate':
+          return buckets.handleGetBucketAccelerate(env, bucket)
+        case 'requestPayment':
+          return buckets.handleGetBucketRequestPayment(env, bucket)
+        case 'publicAccessBlock':
+          return buckets.handleGetPublicAccessBlock(env, bucket)
+        case 'ownershipControls':
+          return buckets.handleGetBucketOwnershipControls(env, bucket)
+        case 'objectLock':
+          return buckets.handleGetObjectLockConfiguration(env, bucket)
+        case 'delete':
+          return buckets.handleDeleteObjects(env, req, bucket)
+        case 'unknown':
+          return notImplemented(rawPath, `${sub.name} is not supported by this gateway`)
+        default:
+          return buckets.handleListObjects(env, bucket, params, params.get('list-type') === '2')
+      }
     case 'HEAD':
       return buckets.handleHeadBucket(env, bucket)
     case 'PUT':
-      return buckets.handleCreateBucket(env, bucket, requested)
+      if (sub.kind === 'none') return buckets.handleCreateBucket(env, bucket, requested)
+      if (sub.kind === 'unknown') return notImplemented(rawPath, `${sub.name} is not supported by this gateway`)
+      return notImplemented(rawPath, `PUT ${sub.kind} is not supported by this gateway`)
     case 'POST':
-      if (params.has('delete')) return buckets.handleDeleteObjects(env, req, bucket)
+      if (sub.kind === 'delete') return buckets.handleDeleteObjects(env, req, bucket)
+      if (sub.kind === 'unknown') return notImplemented(rawPath, `${sub.name} is not supported by this gateway`)
       return methodNotAllowed(rawPath)
     case 'DELETE':
-      if (params.has('delete')) return buckets.handleDeleteObjects(env, req, bucket)
+      if (sub.kind === 'delete') return buckets.handleDeleteObjects(env, req, bucket)
+      if (sub.kind === 'unknown') return notImplemented(rawPath, `${sub.name} is not supported by this gateway`)
       return buckets.handleDeleteBucket(env, bucket)
     default:
       return methodNotAllowed(rawPath)

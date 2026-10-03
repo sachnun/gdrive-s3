@@ -4,7 +4,7 @@ import { DRIVE_API, driveFetch } from '../drive/auth'
 import { DriveError } from '../drive/errors'
 import { FOLDER_MIME, findCachedFolder, folderCacheKey, getOrCreateFolder, resolveExistingFolderId } from '../drive/folder'
 import { listFolderFiles, trashFile, trashFiles } from '../drive/files'
-import { MULTIPART_ROOT } from '../drive/multipart'
+import { MULTIPART_ROOT, listUploads } from '../drive/multipart'
 import { extractXmlKeys } from '../s3/request'
 import { listObjects, type ListOptions } from '../s3/list'
 import * as xml from '../s3/xml'
@@ -44,6 +44,17 @@ export async function handleHeadBucket(env: Env, bucket: string): Promise<Respon
 export async function handleCreateBucket(env: Env, bucket: string, requested = bucket): Promise<Response> {
   if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(requested) || requested.includes('..')) {
     return xml.s3Error(400, 'InvalidBucketName', 'The specified bucket is not valid.', `/${requested}`, requestId())
+  }
+
+  const existing = await findCachedFolder(env, bucket, null)
+  if (existing) {
+    return xml.s3Error(
+      409,
+      'BucketAlreadyOwnedByYou',
+      'Your previous request to create the named bucket succeeded and you already own it.',
+      `/${bucket}`,
+      requestId(),
+    )
   }
 
   await getOrCreateFolder(env, bucket, null)
@@ -136,4 +147,125 @@ export async function handleDeleteObjects(env: Env, req: Request, bucket: string
     else deleted.push(k)
   }
   return xml.deleteResultXml(deleted, errors)
+}
+
+export async function handleListMultipartUploads(env: Env, bucket: string, params: URLSearchParams): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  const maxUploads = Math.min(Math.max(parseInt(params.get('max-uploads') ?? '1000', 10) || 1000, 0), 1000)
+  const prefix = params.get('prefix') ?? ''
+  const uploads = await listUploads(env, bucket, prefix, maxUploads)
+  return xml.listMultipartUploadsXml(bucket, prefix, uploads)
+}
+
+export async function handleGetBucketVersioning(env: Env, bucket: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  return xml.versioningXml()
+}
+
+export async function handleGetBucketAcl(env: Env, bucket: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  return xml.aclXml()
+}
+
+export async function handleGetBucketPolicy(env: Env, bucket: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  return xml.s3Error(404, 'NoSuchBucketPolicy', 'The bucket policy does not exist', `/${bucket}`, requestId())
+}
+
+export async function handleGetBucketTagging(env: Env, bucket: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  return xml.s3Error(404, 'NoSuchTagSet', 'The TagSet does not exist', `/${bucket}`, requestId())
+}
+
+export async function handleGetBucketCors(env: Env, bucket: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  return xml.s3Error(404, 'NoSuchCORSConfiguration', 'The CORS configuration does not exist', `/${bucket}`, requestId())
+}
+
+export async function handleGetBucketLifecycle(env: Env, bucket: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  return xml.s3Error(404, 'NoSuchLifecycleConfiguration', 'The lifecycle configuration does not exist', `/${bucket}`, requestId())
+}
+
+export async function handleGetBucketWebsite(env: Env, bucket: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  return xml.s3Error(404, 'NoSuchWebsiteConfiguration', 'The specified bucket does not have a website configuration', `/${bucket}`, requestId())
+}
+
+export async function handleGetBucketLogging(env: Env, bucket: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  return xml.bucketLoggingXml()
+}
+
+export async function handleGetBucketAccelerate(env: Env, bucket: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  return xml.bucketAccelerateXml()
+}
+
+export async function handleGetBucketRequestPayment(env: Env, bucket: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  return xml.bucketRequestPaymentXml()
+}
+
+export async function handleGetBucketEncryption(env: Env, bucket: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  return xml.s3Error(404, 'ServerSideEncryptionConfigurationNotFoundError', 'The server side encryption configuration was not found', `/${bucket}`, requestId())
+}
+
+export async function handleListObjectVersions(env: Env, bucket: string, params: URLSearchParams): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  const prefix = params.get('prefix') ?? ''
+  const maxKeys = Math.min(Math.max(parseInt(params.get('max-keys') ?? '1000', 10) || 1000, 0), 1000)
+  const result = await listObjects(env, id, {
+    bucket,
+    prefix,
+    delimiter: params.get('delimiter') ?? '',
+    maxKeys,
+    isV2: false,
+    encodingType: params.get('encoding-type') ?? undefined,
+  })
+  return xml.listObjectVersionsXml(bucket, prefix, result.contents, params.get('encoding-type') ?? undefined)
+}
+
+export async function handleGetBucketNotification(env: Env, bucket: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  return xml.emptyConfiguration('NotificationConfiguration')
+}
+
+export async function handleGetBucketReplication(env: Env, bucket: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  return xml.s3Error(404, 'ReplicationConfigurationNotFoundError', 'The replication configuration was not found', `/${bucket}`, requestId())
+}
+
+export async function handleGetPublicAccessBlock(env: Env, bucket: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  return xml.s3Error(404, 'NoSuchPublicAccessBlockConfiguration', 'The public access block configuration was not found', `/${bucket}`, requestId())
+}
+
+export async function handleGetBucketOwnershipControls(env: Env, bucket: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  return xml.s3Error(404, 'OwnershipControlsNotFoundError', 'The bucket ownership controls were not found', `/${bucket}`, requestId())
+}
+
+export async function handleGetObjectLockConfiguration(env: Env, bucket: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  return xml.s3Error(404, 'ObjectLockConfigurationNotFoundError', 'Object Lock configuration does not exist for this bucket', `/${bucket}`, requestId())
 }

@@ -343,8 +343,8 @@ describe('S3 e2e (aws4fetch as client)', () => {
     expect(list).toContain('<Key>Show/ep1.mkv</Key>')
     expect((await s3(ctx, 'HEAD', '/anime/Show/ep1.mkv')).status).toBe(200)
     expect(await (await s3(ctx, 'GET', '/Anime/Show/ep1.mkv')).text()).toBe('x')
-    expect((await s3(ctx, 'PUT', '/anime')).status).toBe(200)
-    expect((await s3(ctx, 'PUT', '/anime')).status).toBe(200)
+    expect((await s3(ctx, 'PUT', '/anime')).status).toBe(409)
+    expect((await s3(ctx, 'PUT', '/anime')).status).toBe(409)
   })
 
   it('caches the alias so only the first request pays for the lookup', async () => {
