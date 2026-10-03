@@ -106,6 +106,15 @@ async function dispatch(
     if (method === 'DELETE') return objects.handleDeleteObjectTagging(env, bucket, key)
   }
   if (sub.kind === 'attributes') return objects.handleGetObjectAttributes(env, bucket, key)
+  if (sub.kind === 'legal-hold') {
+    if (method === 'PUT') return objects.handlePutObjectLegalHold(env, req, bucket, key)
+    return objects.handleGetObjectLegalHold(env, bucket, key)
+  }
+  if (sub.kind === 'retention') {
+    if (method === 'PUT') return objects.handlePutObjectRetention(env, req, bucket, key)
+    return objects.handleGetObjectRetention(env, bucket, key)
+  }
+  if (sub.kind === 'rename' && method === 'PUT') return objects.handleRenameObject(env, req, bucket, key)
   if (sub.kind === 'unknown') {
     return notImplemented(rawPath, `${sub.name} is not supported by this gateway`)
   }
@@ -176,6 +185,11 @@ async function dispatchBucket(
           return buckets.handleGetBucketOwnershipControls(env, bucket)
         case 'objectLock':
           return buckets.handleGetObjectLockConfiguration(env, bucket)
+        case 'abac':
+          return buckets.handleGetBucketAbac(env, bucket)
+        case 'listConfig':
+          if (params.get('id')) return buckets.handleGetBucketConfigById(env, bucket, sub.name, params.get('id')!)
+          return buckets.handleListBucketConfig(env, bucket, sub.name)
         case 'delete':
           return buckets.handleDeleteObjects(env, req, bucket)
         case 'unknown':

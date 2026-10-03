@@ -187,3 +187,55 @@ export async function handlePutObjectAcl(env: Env, bucket: string, key: string):
   if (!file) return xml.s3Error(404, 'NoSuchKey', 'The specified key does not exist.', `/${bucket}/${key}`, requestId())
   return new Response(null, { status: 200, headers: { 'x-amz-request-id': requestId() } })
 }
+
+export async function handleGetObjectLegalHold(env: Env, bucket: string, key: string): Promise<Response> {
+  const file = await findObject(env, bucket, key)
+  if (!file) return xml.s3Error(404, 'NoSuchKey', 'The specified key does not exist.', `/${bucket}/${key}`, requestId())
+  return xml.legalHoldXml(file.appProperties?.['x-amz-legal-hold'] ?? 'OFF')
+}
+
+export async function handlePutObjectLegalHold(env: Env, req: Request, bucket: string, key: string): Promise<Response> {
+  const file = await findObject(env, bucket, key)
+  if (!file) return xml.s3Error(404, 'NoSuchKey', 'The specified key does not exist.', `/${bucket}/${key}`, requestId())
+  const status = /<Status>\s*(ON|OFF)\s*<\/Status>/i.exec(await req.text())?.[1]?.toUpperCase() ?? 'OFF'
+  await patchAppProperties(env, file.id, { 'x-amz-legal-hold': status })
+  return new Response(null, { status: 200, headers: { 'x-amz-request-id': requestId() } })
+}
+
+export async function handleGetObjectRetention(env: Env, bucket: string, key: string): Promise<Response> {
+  const file = await findObject(env, bucket, key)
+  if (!file) return xml.s3Error(404, 'NoSuchKey', 'The specified key does not exist.', `/${bucket}/${key}`, requestId())
+  const mode = file.appProperties?.['x-amz-retention-mode']
+  const until = file.appProperties?.['x-amz-retain-until']
+  if (!mode || !until) {
+    return xml.s3Error(404, 'NoSuchObjectLockConfiguration', 'The specified object does not have a ObjectLock configuration', `/${bucket}/${key}`, requestId())
+  }
+  return xml.retentionXml(mode, until)
+}
+
+export async function handlePutObjectRetention(env: Env, req: Request, bucket: string, key: string): Promise<Response> {
+  const file = await findObject(env, bucket, key)
+  if (!file) return xml.s3Error(404, 'NoSuchKey', 'The specified key does not exist.', `/${bucket}/${key}`, requestId())
+  const body = await req.text()
+  const mode = /<Mode>\s*([A-Za-z]+)\s*<\/Mode>/.exec(body)?.[1] ?? 'GOVERNANCE'
+  const until = /<RetainUntilDate>\s*([^<\s]+)\s*<\/RetainUntilDate>/.exec(body)?.[1] ?? new Date(Date.now() + 86400000).toISOString()
+  await patchAppProperties(env, file.id, { 'x-amz-retention-mode': mode, 'x-amz-retain-until': until })
+  return new Response(null, { status: 200, headers: { 'x-amz-request-id': requestId() } })
+}
+
+export async function handleRenameObject(env: Env, req: Request, bucket: string, key: string): Promise<Response> {
+  const raw = req.headers.get('x-amz-rename-source') ?? ''
+  const srcPath = decodeURIComponent(raw).replace(/^\/+/, '')
+  const slash = srcPath.indexOf('/')
+  if (slash === -1) return xml.s3Error(400, 'InvalidArgument', 'Invalid rename source', `/${bucket}/${key}`, requestId())
+  const srcKey = srcPath.slice(slash + 1)
+  const bucketFolderId = await findCachedFolder(env, bucket, null)
+  if (!bucketFolderId) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  const target = await resolveExistingPath(env, bucketFolderId, srcKey)
+  const src = target ? (await findFilesInFolder(env, target.name, target.parentId))[0] : undefined
+  if (!src) return xml.s3Error(404, 'NoSuchKey', 'The specified key does not exist.', `/${bucket}/${key}`, requestId())
+  const dest = await resolvePathCreate(env, bucketFolderId, key)
+  const copied = await copyFile(env, src.id, dest.name, dest.parentId)
+  await trashFile(env, src.id)
+  return new Response(null, { status: 200, headers: { 'x-amz-request-id': requestId() } })
+}

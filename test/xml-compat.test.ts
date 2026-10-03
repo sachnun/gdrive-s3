@@ -164,11 +164,53 @@ describe('object sub-resources', () => {
   })
 
   it('returns NotImplemented for unsupported object sub-resources', async () => {
-    for (const sub of ['torrent', 'legal-hold', 'retention']) {
+    for (const sub of ['torrent']) {
       const res = await s3(ctx, 'GET', `/test-bucket/obj.txt?${sub}`)
       expect(res.status, sub).toBe(501)
       expect(await res.text(), sub).toContain('NotImplemented')
     }
+  })
+
+  it('round-trips the object legal hold', async () => {
+    const put = await s3(ctx, 'PUT', '/test-bucket/obj.txt?legal-hold', {
+      body: '<LegalHold><Status>ON</Status></LegalHold>',
+    })
+    expect(put.status).toBe(200)
+    const xml = await (await s3(ctx, 'GET', '/test-bucket/obj.txt?legal-hold')).text()
+    expect(rootOf(xml)).toBe('LegalHold')
+    expect(xml).toContain('<Status>ON</Status>')
+  })
+
+  it('round-trips the object retention and reports the AWS code when unset', async () => {
+    const missing = await s3(ctx, 'GET', '/test-bucket/obj.txt?retention')
+    expect(missing.status).toBe(404)
+    expect(await missing.text()).toContain('NoSuchObjectLockConfiguration')
+
+    const until = '2030-01-01T00:00:00.000Z'
+    const put = await s3(ctx, 'PUT', '/test-bucket/obj.txt?retention', {
+      body: `<Retention><Mode>GOVERNANCE</Mode><RetainUntilDate>${until}</RetainUntilDate></Retention>`,
+    })
+    expect(put.status).toBe(200)
+    const xml = await (await s3(ctx, 'GET', '/test-bucket/obj.txt?retention')).text()
+    expect(xml).toContain('<Mode>GOVERNANCE</Mode>')
+    expect(xml).toContain(`<RetainUntilDate>${until}</RetainUntilDate>`)
+  })
+
+  it('renames an object with x-amz-rename-source', async () => {
+    const res = await s3(ctx, 'PUT', '/test-bucket/renamed.txt?renameObject', {
+      headers: { 'x-amz-rename-source': '/test-bucket/obj.txt' },
+    })
+    expect(res.status).toBe(200)
+    expect((await s3(ctx, 'GET', '/test-bucket/renamed.txt')).status).toBe(200)
+    expect((await s3(ctx, 'GET', '/test-bucket/obj.txt')).status).toBe(404)
+  })
+
+  it('reports NoSuchKey when renaming a missing source', async () => {
+    const res = await s3(ctx, 'PUT', '/test-bucket/x.txt?renameObject', {
+      headers: { 'x-amz-rename-source': '/test-bucket/nope.txt' },
+    })
+    expect(res.status).toBe(404)
+    expect(await res.text()).toContain('NoSuchKey')
   })
 
   it('serves GetObjectAttributes', async () => {
@@ -467,5 +509,56 @@ describe('UploadPartCopy', () => {
     })
     expect(res.status).toBe(404)
     expect(await res.text()).toContain('NoSuchUpload')
+  })
+})
+
+describe('bucket list-configuration operations', () => {
+  let ctx: TestSetup
+
+  beforeEach(async () => {
+    ctx = await setupTest()
+    await s3(ctx, 'PUT', '/test-bucket')
+  })
+  afterEach(() => ctx.restore())
+
+  it('answers each list-configuration sub-resource with its own root', async () => {
+    const cases: [string, string][] = [
+      ['inventory', 'ListInventoryConfigurationsResult'],
+      ['metrics', 'ListMetricsConfigurationsResult'],
+      ['analytics', 'ListAnalyticsConfigurationsResult'],
+      ['intelligent-tiering', 'ListIntelligentTieringConfigurationsResult'],
+    ]
+    for (const [sub, root] of cases) {
+      const res = await s3(ctx, 'GET', `/test-bucket?${sub}`)
+      expect(res.status, sub).toBe(200)
+      const xml = await res.text()
+      expect(rootOf(xml), sub).toBe(root)
+      expect(xml, sub).toContain('<IsTruncated>false</IsTruncated>')
+      expect(xml, sub).not.toContain('ListBucketResult')
+    }
+  })
+
+  it('reports NoSuchConfiguration for a requested id', async () => {
+    for (const sub of ['inventory', 'metrics', 'analytics', 'intelligent-tiering']) {
+      const res = await s3(ctx, 'GET', `/test-bucket?${sub}&id=some-id`)
+      expect(res.status, sub).toBe(404)
+      expect(await res.text(), sub).toContain('NoSuchConfiguration')
+    }
+  })
+
+  it('serves GetBucketAbac', async () => {
+    const res = await s3(ctx, 'GET', '/test-bucket?abac')
+    expect(res.status).toBe(200)
+    const xml = await res.text()
+    expect(rootOf(xml)).toBe('GetBucketAbacOutput')
+    expect(xml).toContain('<Status>Disabled</Status>')
+  })
+
+  it('reports NoSuchBucket for list-configuration on a missing bucket', async () => {
+    for (const sub of ['inventory', 'metrics', 'analytics', 'intelligent-tiering', 'abac']) {
+      const res = await s3(ctx, 'GET', `/missing-bucket?${sub}`)
+      expect(res.status, sub).toBe(404)
+      expect(await res.text(), sub).toContain('NoSuchBucket')
+    }
   })
 })

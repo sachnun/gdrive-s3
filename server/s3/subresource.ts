@@ -26,6 +26,11 @@ type SubResource =
   | { kind: 'objectLockEnabled' }
   | { kind: 'delete' }
   | { kind: 'attributes' }
+  | { kind: 'legal-hold' }
+  | { kind: 'retention' }
+  | { kind: 'rename' }
+  | { kind: 'abac' }
+  | { kind: 'listConfig'; name: string }
   | { kind: 'unknown'; name: string }
 
 const KNOWN = new Set([
@@ -98,6 +103,10 @@ export function bucketSubResource(params: URLSearchParams): SubResource {
   if (params.has('ownershipControls')) return { kind: 'ownershipControls' }
   if (params.has('object-lock')) return { kind: 'objectLock' }
   if (params.has('objectLockEnabled')) return { kind: 'objectLockEnabled' }
+  if (params.has('abac')) return { kind: 'abac' }
+  for (const name of ['inventory', 'metrics', 'analytics', 'intelligent-tiering']) {
+    if (params.has(name)) return { kind: 'listConfig', name }
+  }
   if (params.has('delete')) return { kind: 'delete' }
 
   for (const name of params.keys()) {
@@ -112,8 +121,9 @@ export function objectSubResource(params: URLSearchParams): SubResource {
   if (params.has('tagging')) return { kind: 'tagging' }
   if (params.has('attributes')) return { kind: 'attributes' }
   if (params.has('torrent')) return { kind: 'unknown', name: 'torrent' }
-  if (params.has('legal-hold')) return { kind: 'unknown', name: 'legal-hold' }
-  if (params.has('retention')) return { kind: 'unknown', name: 'retention' }
+  if (params.has('legal-hold')) return { kind: 'legal-hold' }
+  if (params.has('retention')) return { kind: 'retention' }
+  if (params.has('renameObject')) return { kind: 'rename' }
   return { kind: 'none' }
 }
 

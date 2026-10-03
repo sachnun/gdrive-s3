@@ -324,3 +324,38 @@ export async function handlePutBucketAcl(env: Env, bucket: string): Promise<Resp
   if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
   return new Response(null, { status: 200, headers: { 'x-amz-request-id': requestId() } })
 }
+
+export async function handleGetBucketAbac(env: Env, bucket: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  return xml.abacXml()
+}
+
+export async function handleListBucketConfig(env: Env, bucket: string, kind: string): Promise<Response> {
+  const id = await findCachedFolder(env, bucket, null)
+  if (!id) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  const roots: Record<string, [string, string]> = {
+    inventory: ['ListInventoryConfigurationsResult', 'InventoryConfiguration'],
+    metrics: ['ListMetricsConfigurationsResult', 'MetricsConfiguration'],
+    analytics: ['ListAnalyticsConfigurationsResult', 'AnalyticsConfiguration'],
+    'intelligent-tiering': ['ListIntelligentTieringConfigurationsResult', 'IntelligentTieringConfiguration'],
+  }
+  const entry = roots[kind]
+  if (!entry) {
+    return xml.s3Error(501, 'NotImplemented', `${kind} is not supported by this gateway`, `/${bucket}`, requestId())
+  }
+  return xml.emptyListConfigXml(entry[0], entry[1], bucket)
+}
+
+export async function handleGetBucketConfigById(env: Env, bucket: string, kind: string, id: string): Promise<Response> {
+  const bucketId = await findCachedFolder(env, bucket, null)
+  if (!bucketId) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
+  const codes: Record<string, string> = {
+    inventory: 'NoSuchConfiguration',
+    metrics: 'NoSuchConfiguration',
+    analytics: 'NoSuchConfiguration',
+    'intelligent-tiering': 'NoSuchConfiguration',
+  }
+  const code = codes[kind] ?? 'NoSuchConfiguration'
+  return xml.s3Error(404, code, `The specified ${kind} configuration does not exist`, `/${bucket}`, requestId())
+}

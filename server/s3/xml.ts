@@ -352,3 +352,35 @@ export function copyPartXml(etag: string, lastModified: string, range?: string |
   parts.push('</CopyPartResult>')
   return new Response(parts.join(''), { status: 200, headers: XML_HEADERS })
 }
+
+export function legalHoldXml(status: string): Response {
+  const xml = `<?xml version="1.0" encoding="UTF-8"?><LegalHold xmlns="${XMLNS}"><Status>${xmlEscape(status)}</Status></LegalHold>`
+  return new Response(xml, { status: 200, headers: XML_HEADERS })
+}
+
+export function retentionXml(mode: string, until: string): Response {
+  const xml = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    `<Retention xmlns="${XMLNS}">`,
+    `<Mode>${xmlEscape(mode)}</Mode>`,
+    `<RetainUntilDate>${xmlEscape(until)}</RetainUntilDate>`,
+    '</Retention>',
+  ].join('')
+  return new Response(xml, { status: 200, headers: XML_HEADERS })
+}
+
+export function abacXml(): Response {
+  const xml = `<?xml version="1.0" encoding="UTF-8"?><GetBucketAbacOutput xmlns="${XMLNS}"><AbacStatus><Status>Disabled</Status></AbacStatus></GetBucketAbacOutput>`
+  return new Response(xml, { status: 200, headers: XML_HEADERS })
+}
+
+export function emptyListConfigXml(root: string, item: string, bucket: string): Response {
+  const xml = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    `<${root} xmlns="${XMLNS}">`,
+    `<Bucket>${xmlEscape(bucket)}</Bucket>`,
+    '<IsTruncated>false</IsTruncated>',
+    `</${root}>`,
+  ].join('')
+  return new Response(xml, { status: 200, headers: XML_HEADERS })
+}
