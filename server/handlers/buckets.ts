@@ -2,8 +2,8 @@ import type { Env } from '../env'
 import { BUCKETS } from '../config'
 import { DRIVE_API, driveFetch } from '../drive/auth'
 import { DriveError } from '../drive/errors'
-import { FOLDER_MIME, findCachedFolder, folderCacheKey, getOrCreateFolder, resolveExistingPath } from '../drive/folder'
-import { findFilesInFolder, trashFile, trashFiles } from '../drive/files'
+import { FOLDER_MIME, findCachedFolder, folderCacheKey, getOrCreateFolder, resolveExistingFolderId } from '../drive/folder'
+import { listFolderFiles, trashFile, trashFiles } from '../drive/files'
 import { MULTIPART_ROOT } from '../drive/multipart'
 import { extractXmlKeys } from '../s3/request'
 import { listObjects, type ListOptions } from '../s3/list'
@@ -92,30 +92,48 @@ export async function handleDeleteBucket(env: Env, bucket: string): Promise<Resp
 export async function handleDeleteObjects(env: Env, req: Request, bucket: string): Promise<Response> {
   const body = await req.text()
   const keys = extractXmlKeys(body)
-  let bucketFolderId: string | null = null
-  if (keys.length > 0) bucketFolderId = await findCachedFolder(env, bucket, null).catch(() => null)
-  const resolved = await mapLimit(keys, DELETE_OBJECTS_CONCURRENCY, async (k): Promise<string | null> => {
-    try {
-      const target = bucketFolderId ? await resolveExistingPath(env, bucketFolderId, k) : null
-      if (!target) return null
-      const file = (await findFilesInFolder(env, target.name, target.parentId))[0]
-      return file?.id ?? null
-    } catch {
-      return null
+  const bucketFolderId = keys.length > 0 ? await findCachedFolder(env, bucket, null).catch(() => null) : null
+
+  const byDir = new Map<string, { dirPath: string; names: Set<string> }>()
+  for (const k of keys) {
+    const slash = k.lastIndexOf('/')
+    const dirPath = slash === -1 ? '' : k.slice(0, slash)
+    const name = slash === -1 ? k : k.slice(slash + 1)
+    let group = byDir.get(dirPath)
+    if (!group) {
+      group = { dirPath, names: new Set() }
+      byDir.set(dirPath, group)
     }
+    group.names.add(name)
+  }
+
+  const idByName = new Map<string, string>()
+  await mapLimit([...byDir.values()], DELETE_OBJECTS_CONCURRENCY, async (group) => {
+    if (!bucketFolderId) return
+    try {
+      const dirId = group.dirPath
+        ? await resolveExistingFolderId(env, bucketFolderId, group.dirPath)
+        : bucketFolderId
+      if (!dirId) return
+      for (const f of await listFolderFiles(env, dirId)) {
+        if (group.names.has(f.name)) idByName.set(group.dirPath ? `${group.dirPath}/${f.name}` : f.name, f.id)
+      }
+    } catch {}
   })
-  const ids = resolved.filter((id): id is string => id !== null)
+
+  const ids = keys.map((k) => idByName.get(k)).filter((id): id is string => id !== undefined)
   const failed = ids.length > 0 ? await trashFiles(env, ids) : new Map<string, string | null>()
   const deleted: string[] = []
   const errors: { key: string; code: string; message: string }[] = []
-  resolved.forEach((id, i) => {
+  for (const k of keys) {
+    const id = idByName.get(k)
     if (!id) {
-      deleted.push(keys[i])
-      return
+      deleted.push(k)
+      continue
     }
     const err = failed.get(id)
-    if (err) errors.push({ key: keys[i], code: 'InternalError', message: `failed to delete object (${err})` })
-    else deleted.push(keys[i])
-  })
+    if (err) errors.push({ key: k, code: 'InternalError', message: `failed to delete object (${err})` })
+    else deleted.push(k)
+  }
   return xml.deleteResultXml(deleted, errors)
 }

@@ -200,3 +200,20 @@ export async function trashFiles(env: Env, ids: string[]): Promise<Map<string, s
   }
   return failed
 }
+
+export async function listFolderFiles(env: Env, parentId: string): Promise<FileMeta[]> {
+  const out: FileMeta[] = []
+  let pageToken: string | undefined
+  for (let page = 0; page < 20; page++) {
+    const q = `'${parentId}' in parents and trashed=false and mimeType!='${FOLDER_MIME}'`
+    let url = `${DRIVE_API}/drive/v3/files?q=${encodeURIComponent(q)}&pageSize=1000&fields=nextPageToken,files(${FILE_FIELDS})&spaces=drive`
+    if (pageToken) url += `&pageToken=${pageToken}`
+    const res = await driveFetch(env, url)
+    if (!res.ok) throw new DriveError(500, 'InternalError', `folder listing failed (HTTP ${res.status})`)
+    const data = (await res.json()) as { nextPageToken?: string; files: FileMeta[] }
+    out.push(...(data.files ?? []))
+    pageToken = data.nextPageToken
+    if (!pageToken) break
+  }
+  return out
+}
