@@ -1,5 +1,6 @@
 import { H3 } from 'h3'
 import type { Env } from './env'
+import { resolveBucketAlias } from './drive/alias'
 import { checkBucket, verifyRequest } from './s3/access'
 import { parseRequest } from './s3/request'
 import * as buckets from './handlers/buckets'
@@ -58,22 +59,25 @@ async function dispatch(
   params: URLSearchParams,
   waitUntil: (promise: Promise<unknown>) => void,
 ): Promise<Response> {
-  const { bucket, key } = parseRequest(rawPath)
+  const requested = parseRequest(rawPath).bucket
 
-  if (!bucket) {
+  if (!requested) {
     const sig = await verifyRequest(env, req)
     if (!sig.ok) return xml.s3Error(sig.status, sig.code, sig.message, rawPath, requestId())
     if (method === 'GET') return buckets.handleListBuckets(env)
     return xml.s3Error(400, 'InvalidRequest', 'Unknown request at root path', rawPath, requestId())
   }
 
-  const gate = checkBucket(bucket)
-  if (!gate.ok) return gate.response
-
   const sig = await verifyRequest(env, req)
   if (!sig.ok) return xml.s3Error(sig.status, sig.code, sig.message, rawPath, requestId())
 
-  if (!key) return dispatchBucket(env, req, method, params, rawPath, bucket, sig.region)
+  const bucket = await resolveBucketAlias(env, requested)
+  const key = parseRequest(rawPath).key
+
+  const gate = checkBucket(requested, bucket)
+  if (!gate.ok) return gate.response
+
+  if (!key) return dispatchBucket(env, req, method, params, rawPath, bucket, sig.region, requested)
 
   const isUploadMethod = method === 'PUT' || method === 'POST'
   if (isUploadMethod && params.has('uploads')) {
@@ -108,6 +112,7 @@ async function dispatchBucket(
   rawPath: string,
   bucket: string,
   region: string,
+  requested: string,
 ): Promise<Response> {
   switch (method) {
     case 'GET':
@@ -117,7 +122,7 @@ async function dispatchBucket(
     case 'HEAD':
       return buckets.handleHeadBucket(env, bucket)
     case 'PUT':
-      return buckets.handleCreateBucket(env, bucket)
+      return buckets.handleCreateBucket(env, bucket, requested)
     case 'POST':
       if (params.has('delete')) return buckets.handleDeleteObjects(env, req, bucket)
       return methodNotAllowed(rawPath)

@@ -41,10 +41,11 @@ export async function handleHeadBucket(env: Env, bucket: string): Promise<Respon
   return new Response(null, { status: 200, headers: { 'x-amz-request-id': requestId() } })
 }
 
-export async function handleCreateBucket(env: Env, bucket: string): Promise<Response> {
-  if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket) || bucket.includes('..')) {
-    return xml.s3Error(400, 'InvalidBucketName', 'The specified bucket is not valid.', `/${bucket}`, requestId())
+export async function handleCreateBucket(env: Env, bucket: string, requested = bucket): Promise<Response> {
+  if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(requested) || requested.includes('..')) {
+    return xml.s3Error(400, 'InvalidBucketName', 'The specified bucket is not valid.', `/${requested}`, requestId())
   }
+
   await getOrCreateFolder(env, bucket, null)
   return new Response(null, { status: 200, headers: { 'x-amz-request-id': requestId() } })
 }
@@ -62,6 +63,7 @@ export async function handleListObjects(
   isV2: boolean,
 ): Promise<Response> {
   const bucketFolderId = await findCachedFolder(env, bucket, null)
+  if (!bucketFolderId) return xml.s3Error(404, 'NoSuchBucket', 'The specified bucket does not exist', `/${bucket}`, requestId())
   const maxKeysRaw = parseInt(params.get('max-keys') ?? '1000', 10)
   const maxKeys = isNaN(maxKeysRaw) ? 1000 : Math.min(Math.max(maxKeysRaw, 0), 1000)
   const opts: ListOptions = {

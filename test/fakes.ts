@@ -146,13 +146,17 @@ export class FakeDrive {
 
 export interface StubOptions {
   validTokens?: string[]
+
   refreshToken?: string
 }
 
 export interface FetchStub {
   (input: RequestInfo | URL, init?: RequestInit): Promise<Response>
   setValidTokens: (tokens: string[]) => void
+
   oauthLog: string[]
+
+  calls: string[]
 }
 
 export function makeFetchStub(drive: FakeDrive, opts: StubOptions = {}): FetchStub {
@@ -160,9 +164,11 @@ export function makeFetchStub(drive: FakeDrive, opts: StubOptions = {}): FetchSt
     validTokens: opts.validTokens ?? ['fake-token'],
     refreshToken: opts.refreshToken ?? 'fake-token',
     oauthLog: [] as string[],
+    calls: [] as string[],
   }
   const stub = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = new URL(String(input))
+    state.calls.push(url.pathname + url.search)
     const method = (init?.method ?? 'GET').toUpperCase()
     const headers = new Headers(init?.headers ?? {})
     const body = init?.body ?? null
@@ -348,6 +354,7 @@ export function makeFetchStub(drive: FakeDrive, opts: StubOptions = {}): FetchSt
     state.validTokens = tokens
   }
   stub.oauthLog = state.oauthLog
+  stub.calls = state.calls
   return stub
 }
 

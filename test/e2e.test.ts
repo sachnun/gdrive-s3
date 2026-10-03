@@ -333,6 +333,36 @@ describe('S3 e2e (aws4fetch as client)', () => {
     expect(page2).not.toContain('<Key>t1.txt</Key>')
   })
 
+  it('resolves a bucket name case-insensitively to the Drive folder', async () => {
+    ctx.drive.addFile({ name: 'Anime', mimeType: 'application/vnd.google-apps.folder', parents: ['root'] })
+    const res = await s3(ctx, 'PUT', '/anime/Show/ep1.mkv', { body: 'x' })
+    expect(res.status).toBe(200)
+
+    const list = await (await s3(ctx, 'GET', '/ANIME?list-type=2')).text()
+    expect(list).toContain('<Name>Anime</Name>')
+    expect(list).toContain('<Key>Show/ep1.mkv</Key>')
+    expect((await s3(ctx, 'HEAD', '/anime/Show/ep1.mkv')).status).toBe(200)
+    expect(await (await s3(ctx, 'GET', '/Anime/Show/ep1.mkv')).text()).toBe('x')
+    expect((await s3(ctx, 'PUT', '/anime')).status).toBe(200)
+    expect((await s3(ctx, 'PUT', '/anime')).status).toBe(200)
+  })
+
+  it('caches the alias so only the first request pays for the lookup', async () => {
+    ctx.drive.addFile({ name: 'Movie', mimeType: 'application/vnd.google-apps.folder', parents: ['root'] })
+    expect((await s3(ctx, 'PUT', '/movie/m1.mkv', { body: 'x' })).status).toBe(200)
+    const lookupsBefore = ctx.stub.calls.filter((c) => c.includes('name%3D%27movie%27')).length
+    expect(lookupsBefore).toBeGreaterThan(0)
+    expect((await s3(ctx, 'GET', '/movie/m1.mkv')).status).toBe(200)
+    const lookupsAfter = ctx.stub.calls.filter((c) => c.includes('name%3D%27movie%27')).length
+    expect(lookupsAfter).toBe(lookupsBefore)
+  })
+
+  it('keeps unknown bucket names unknown (NoSuchBucket)', async () => {
+    const res = await s3(ctx, 'GET', '/missing-bucket')
+    expect(res.status).toBe(404)
+    expect(await res.text()).toContain('NoSuchBucket')
+  })
+
   it('CopyObject within the same bucket', async () => {
     await s3(ctx, 'PUT', '/test-bucket', {})
     await s3(ctx, 'PUT', '/test-bucket/src.txt', { body: 'copy me' })
